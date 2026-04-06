@@ -4,8 +4,17 @@
 
 #include "flutter/shell/platform/windows/external_texture_d3d.h"
 
+#include <d3d11.h>
+#include <wrl/client.h>
+
 #include "flutter/fml/logging.h"
 #include "flutter/shell/platform/embedder/embedder_struct_macros.h"
+
+// GL_RGBA16F_EXT is defined in GLES2/gl2ext.h (0x881A).
+// Use it for RGBA16Float D3D textures to preserve HDR values >1.0.
+#ifndef GL_RGBA16F_EXT
+#define GL_RGBA16F_EXT 0x881A
+#endif
 
 namespace flutter {
 
@@ -42,7 +51,7 @@ bool ExternalTextureD3d::PopulateTexture(size_t width,
   // Populate the texture object used by the engine.
   opengl_texture->target = GL_TEXTURE_2D;
   opengl_texture->name = gl_texture_;
-  opengl_texture->format = GL_RGBA8_OES;
+  opengl_texture->format = is_rgba16float_ ? GL_RGBA16F_EXT : GL_RGBA8_OES;
   opengl_texture->destruction_callback = nullptr;
   opengl_texture->user_data = nullptr;
   opengl_texture->width = SAFE_ACCESS(descriptor, visible_width, 0);
@@ -84,6 +93,33 @@ bool ExternalTextureD3d::CreateOrUpdateTexture(
   if (handle != last_surface_handle_) {
     ReleaseImage();
 
+    // Detect RGBA16Float textures for HDR support.
+    // Query the D3D11 texture format to determine if this is an FP16 surface.
+    is_rgba16float_ = false;
+    if (type_ == kFlutterDesktopGpuSurfaceTypeD3d11Texture2D) {
+      auto* d3d_texture = static_cast<ID3D11Texture2D*>(handle);
+      D3D11_TEXTURE2D_DESC tex_desc;
+      d3d_texture->GetDesc(&tex_desc);
+      is_rgba16float_ =
+          (tex_desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT);
+    } else if (type_ == kFlutterDesktopGpuSurfaceTypeDxgiSharedHandle) {
+      // For shared handles, open the texture via ANGLE's D3D11 device to
+      // query its format.
+      Microsoft::WRL::ComPtr<ID3D11Device> angle_device;
+      if (const_cast<egl::Manager*>(egl_manager_)
+              ->GetDevice(angle_device.GetAddressOf())) {
+        Microsoft::WRL::ComPtr<ID3D11Texture2D> shared_texture;
+        HRESULT hr = angle_device->OpenSharedResource(
+            static_cast<HANDLE>(handle), IID_PPV_ARGS(&shared_texture));
+        if (SUCCEEDED(hr) && shared_texture) {
+          D3D11_TEXTURE2D_DESC tex_desc;
+          shared_texture->GetDesc(&tex_desc);
+          is_rgba16float_ =
+              (tex_desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT);
+        }
+      }
+    }
+
     EGLint attributes[] = {
         EGL_WIDTH,
         static_cast<EGLint>(SAFE_ACCESS(descriptor, width, 0)),
@@ -92,7 +128,7 @@ bool ExternalTextureD3d::CreateOrUpdateTexture(
         EGL_TEXTURE_TARGET,
         EGL_TEXTURE_2D,
         EGL_TEXTURE_FORMAT,
-        EGL_TEXTURE_RGBA,  // always EGL_TEXTURE_RGBA
+        EGL_TEXTURE_RGBA,
         EGL_NONE};
 
     egl_surface_ = egl_manager_->CreateSurfaceFromHandle(

@@ -47,6 +47,10 @@ class ExternalTextureD3d : public ExternalTexture {
   GLuint gl_texture_ = 0;
   EGLSurface egl_surface_ = EGL_NO_SURFACE;
   void* last_surface_handle_ = nullptr;
+  // True when the D3D texture is DXGI_FORMAT_R16G16B16A16_FLOAT.
+  // Used to report GL_RGBA16F_EXT instead of GL_RGBA8_OES to the engine,
+  // preserving HDR values >1.0.
+  bool is_rgba16float_ = false;
 
   FML_DISALLOW_COPY_AND_ASSIGN(ExternalTextureD3d);
 };
