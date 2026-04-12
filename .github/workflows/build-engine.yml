@@ -1,0 +1,313 @@
+name: Build Engine
+
+# Builds patched Flutter engine binaries and uploads them as release assets.
+# Triggered on push to OlymEDRSupport, or manually via workflow_dispatch.
+#
+# PREREQUISITE: The self-hosted runners (macmini-runner-1..4) must be shared
+# with this repo at the org level. In GitHub org settings:
+#   Settings > Actions > Runner groups > Default > Repository access
+#   Add "mylollc/flutter" to the allowed repositories.
+
+on:
+  push:
+    branches: [OlymEDRSupport]
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: 'Platform to build (or "all")'
+        required: true
+        default: 'macos'
+        type: choice
+        options:
+          - macos
+          - ios
+          # - windows   # uncomment when ready
+          # - linux     # uncomment when ready
+          # - android   # uncomment when ready
+          - all
+
+env:
+  # Must match the Flutter SDK version on CI runners.
+  # Update this + the release tag when upgrading Flutter.
+  ENGINE_TAG: v3.41.2-edr
+
+jobs:
+  build-macos:
+    if: >-
+      github.event_name == 'push' ||
+      github.event.inputs.platform == 'macos' ||
+      github.event.inputs.platform == 'all'
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 120
+    env:
+      ENGINE_PATH: /tmp/flutter-engine-build
+    steps:
+      - name: Check prerequisites
+        run: |
+          # depot_tools is needed for gclient sync
+          if ! command -v gclient &>/dev/null; then
+            echo "Installing depot_tools..."
+            git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git /tmp/depot_tools
+            echo "/tmp/depot_tools" >> $GITHUB_PATH
+            export PATH="/tmp/depot_tools:$PATH"
+          fi
+          gclient --version
+          ninja --version
+
+      - name: Clone and sync engine
+        run: |
+          mkdir -p "$ENGINE_PATH"
+          cd "$ENGINE_PATH"
+
+          # Clone the fork if not already present
+          if [ ! -d ".git" ]; then
+            git clone --depth=1 -b OlymEDRSupport \
+              https://github.com/mylollc/flutter.git .
+          else
+            git fetch origin OlymEDRSupport --quiet
+            git checkout FETCH_HEAD --quiet --detach
+          fi
+
+          # Create .gclient if missing
+          if [ ! -f ".gclient" ]; then
+            cat > .gclient << 'GCLIENT'
+          solutions = [
+            {
+              "managed": False,
+              "name": ".",
+              "url": "https://github.com/mylollc/flutter.git@OlymEDRSupport",
+              "deps_file": "DEPS",
+              "safesync_url": "",
+              "custom_vars": {},
+            },
+          ]
+          GCLIENT
+          fi
+
+          gclient sync --no-history -D
+
+      - name: Build arm64 release
+        run: |
+          cd "$ENGINE_PATH/engine/src"
+          ./flutter/tools/gn --runtime-mode release --mac-cpu arm64
+          ninja -C out/host_release_arm64
+
+      - name: Build x64 release
+        run: |
+          cd "$ENGINE_PATH/engine/src"
+          ./flutter/tools/gn --runtime-mode release --mac-cpu x64
+          ninja -C out/host_release
+
+      - name: Create universal framework
+        run: |
+          cd "$ENGINE_PATH/engine/src"
+          ARM64_FW="out/host_release_arm64/FlutterMacOS.framework/Versions/A/FlutterMacOS"
+          X64_FW="out/host_release/FlutterMacOS.framework/Versions/A/FlutterMacOS"
+
+          # Try alternate path if Versions/A doesn't exist
+          [ -f "$ARM64_FW" ] || ARM64_FW="out/host_release_arm64/FlutterMacOS.framework/FlutterMacOS"
+          [ -f "$X64_FW" ] || X64_FW="out/host_release/FlutterMacOS.framework/FlutterMacOS"
+
+          echo "Creating universal binary..."
+          lipo -create "$ARM64_FW" "$X64_FW" -output "${ARM64_FW}.universal"
+          mv "${ARM64_FW}.universal" "$ARM64_FW"
+          lipo -info "$ARM64_FW"
+
+          # Copy gen_snapshot_x64 from x64 build
+          X64_GS="out/host_release/gen_snapshot"
+          [ -f "out/host_release/artifacts_x64/gen_snapshot_x64" ] && \
+            X64_GS="out/host_release/artifacts_x64/gen_snapshot_x64"
+          cp "$X64_GS" "out/host_release_arm64/gen_snapshot_x64"
+          echo "gen_snapshot_x64 copied"
+
+      - name: Package and upload
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd "$ENGINE_PATH/engine/src/out/host_release_arm64"
+          ASSET="engine-macos-universal.tar.gz"
+          tar czf "/tmp/$ASSET" \
+            FlutterMacOS.framework \
+            gen_snapshot \
+            gen_snapshot_x64 \
+            $(ls gen_snapshot_host_targeting_host 2>/dev/null)
+
+          echo "Packaged: $(du -h /tmp/$ASSET | cut -f1)"
+
+          # Install gh CLI if not available
+          if ! command -v gh &>/dev/null; then
+            brew install gh 2>/dev/null || {
+              echo "Installing gh from tarball..."
+              curl -fsSL https://github.com/cli/cli/releases/latest/download/gh_2.65.0_macOS_arm64.tar.gz | \
+                tar xz -C /tmp && export PATH="/tmp/gh_2.65.0_macOS_arm64/bin:$PATH"
+            }
+          fi
+
+          # Create release if it doesn't exist
+          gh release view "$ENGINE_TAG" --repo mylollc/flutter &>/dev/null || \
+            gh release create "$ENGINE_TAG" \
+              --repo mylollc/flutter \
+              --target OlymEDRSupport \
+              --title "Flutter ${ENGINE_TAG#v} Engine" \
+              --notes "Auto-built engine binaries with RGBA16Float EDR/HDR support."
+
+          # Delete old asset if present, then upload new one
+          gh release delete-asset "$ENGINE_TAG" "$ASSET" \
+            --repo mylollc/flutter --yes 2>/dev/null || true
+          gh release upload "$ENGINE_TAG" "/tmp/$ASSET" \
+            --repo mylollc/flutter
+
+          echo "Uploaded $ASSET to mylollc/flutter@$ENGINE_TAG"
+
+      - name: Cleanup build
+        if: always()
+        run: |
+          # Keep the cloned source for incremental builds but remove build output
+          rm -rf "$ENGINE_PATH/engine/src/out"
+          echo "Build output cleaned"
+
+  build-ios:
+    if: >-
+      github.event_name == 'push' ||
+      github.event.inputs.platform == 'ios' ||
+      github.event.inputs.platform == 'all'
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 120
+    env:
+      ENGINE_PATH: /tmp/flutter-engine-build
+    steps:
+      - name: Check prerequisites
+        run: |
+          if ! command -v gclient &>/dev/null; then
+            echo "Installing depot_tools..."
+            git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git /tmp/depot_tools
+            echo "/tmp/depot_tools" >> $GITHUB_PATH
+            export PATH="/tmp/depot_tools:$PATH"
+          fi
+          gclient --version
+          ninja --version
+
+      - name: Clone and sync engine
+        run: |
+          mkdir -p "$ENGINE_PATH"
+          cd "$ENGINE_PATH"
+
+          if [ ! -d ".git" ]; then
+            git clone --depth=1 -b OlymEDRSupport \
+              https://github.com/mylollc/flutter.git .
+          else
+            git fetch origin OlymEDRSupport --quiet
+            git checkout FETCH_HEAD --quiet --detach
+          fi
+
+          if [ ! -f ".gclient" ]; then
+            cat > .gclient << 'GCLIENT'
+          solutions = [
+            {
+              "managed": False,
+              "name": ".",
+              "url": "https://github.com/mylollc/flutter.git@OlymEDRSupport",
+              "deps_file": "DEPS",
+              "safesync_url": "",
+              "custom_vars": {},
+            },
+          ]
+          GCLIENT
+          fi
+
+          gclient sync --no-history -D
+
+      - name: Build iOS device release
+        run: |
+          cd "$ENGINE_PATH/engine/src"
+          ./flutter/tools/gn --ios --runtime-mode release
+          ninja -C out/ios_release
+
+      - name: Build iOS simulator (arm64 + x64)
+        run: |
+          cd "$ENGINE_PATH/engine/src"
+          # arm64 simulator (Apple Silicon Macs)
+          ./flutter/tools/gn --ios --simulator --runtime-mode release --simulator-cpu arm64
+          ninja -C out/ios_release_sim_arm64
+          # x64 simulator (Intel Macs)
+          ./flutter/tools/gn --ios --simulator --runtime-mode release --simulator-cpu x64
+          ninja -C out/ios_release_sim_x64
+
+      - name: Create xcframework and package
+        run: |
+          cd "$ENGINE_PATH/engine/src"
+          WORK=$(mktemp -d)
+
+          # Build universal simulator framework
+          SIMFW="$WORK/Flutter_sim.framework"
+          mkdir -p "$SIMFW"
+          cp -R out/ios_release_sim_arm64/Flutter.framework/* "$SIMFW/"
+          lipo -create \
+            out/ios_release_sim_arm64/Flutter.framework/Flutter \
+            out/ios_release_sim_x64/Flutter.framework/Flutter \
+            -output "$SIMFW/Flutter"
+
+          # Create xcframework
+          xcodebuild -create-xcframework \
+            -framework out/ios_release/Flutter.framework \
+            -framework "$SIMFW" \
+            -output "$WORK/Flutter.xcframework"
+
+          # Copy gen_snapshot_arm64 (host tool that targets iOS arm64)
+          GS_ARM64=""
+          for candidate in \
+            out/ios_release/clang_x64/gen_snapshot_arm64 \
+            out/ios_release/gen_snapshot_arm64 \
+            out/host_release_arm64/gen_snapshot_arm64; do
+            [ -f "$candidate" ] && GS_ARM64="$candidate" && break
+          done
+          if [ -n "$GS_ARM64" ]; then
+            cp "$GS_ARM64" "$WORK/gen_snapshot_arm64"
+          else
+            echo "WARNING: gen_snapshot_arm64 not found"
+          fi
+
+          # Also package extension_safe variant if present
+          if [ -d "out/ios_release/Flutter.framework" ]; then
+            mkdir -p "$WORK/extension_safe"
+            # extension_safe uses the same framework for now
+            cp -R "$WORK/Flutter.xcframework" "$WORK/extension_safe/Flutter.xcframework"
+          fi
+
+          ASSET="engine-ios-arm64.tar.gz"
+          cd "$WORK"
+          tar czf "/tmp/$ASSET" Flutter.xcframework gen_snapshot_arm64 extension_safe
+          echo "Packaged: $(du -h /tmp/$ASSET | cut -f1)"
+
+      - name: Upload
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ASSET="engine-ios-arm64.tar.gz"
+
+          if ! command -v gh &>/dev/null; then
+            brew install gh 2>/dev/null || {
+              curl -fsSL https://github.com/cli/cli/releases/latest/download/gh_2.65.0_macOS_arm64.tar.gz | \
+                tar xz -C /tmp && export PATH="/tmp/gh_2.65.0_macOS_arm64/bin:$PATH"
+            }
+          fi
+
+          gh release view "$ENGINE_TAG" --repo mylollc/flutter &>/dev/null || \
+            gh release create "$ENGINE_TAG" \
+              --repo mylollc/flutter \
+              --target OlymEDRSupport \
+              --title "Flutter ${ENGINE_TAG#v} Engine" \
+              --notes "Auto-built engine binaries with RGBA16Float EDR/HDR support."
+
+          gh release delete-asset "$ENGINE_TAG" "$ASSET" \
+            --repo mylollc/flutter --yes 2>/dev/null || true
+          gh release upload "$ENGINE_TAG" "/tmp/$ASSET" \
+            --repo mylollc/flutter
+
+          echo "Uploaded $ASSET to mylollc/flutter@$ENGINE_TAG"
+
+      - name: Cleanup build
+        if: always()
+        run: |
+          rm -rf "$ENGINE_PATH/engine/src/out"
+          echo "Build output cleaned"
