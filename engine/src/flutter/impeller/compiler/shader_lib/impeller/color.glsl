@@ -60,4 +60,15 @@ f16vec4 IPHalfPremultiply(f16vec4 color) {
   return f16vec4(color.rgb * color.a, color.a);
 }
 
+/// Apply the sRGB OETF (linear → gamma-encoded sRGB) to the given linear RGB.
+/// Matches Skia's SkColorSpaceXformSteps: values >1.0 pass through the gamma
+/// curve unclamped so CA's inverse EOTF recovers the original linear values
+/// for EDR highlights. Negative values are clamped to 0 before pow() to avoid
+/// NaN.
+vec3 IPSrgbOETF(vec3 linear) {
+  return mix(12.92 * linear,
+             1.055 * pow(max(linear, vec3(0.0)), vec3(1.0 / 2.4)) - 0.055,
+             step(vec3(0.0031308), linear));
+}
+
 #endif

@@ -28,6 +28,11 @@
                             width:(size_t)width
                            height:(size_t)height;
 
++ (sk_sp<SkImage>)wrapRGBA16FloatTexture:(nonnull id<MTLTexture>)rgbaTex
+                               grContext:(nonnull GrDirectContext*)grContext
+                                   width:(size_t)width
+                                  height:(size_t)height;
+
 @end
 
 @interface FlutterDarwinExternalTextureImpellerImageWrapper : NSObject
@@ -39,6 +44,9 @@
 
 + (sk_sp<flutter::DlImage>)wrapRGBATexture:(nonnull id<MTLTexture>)rgbaTex
                                aiksContext:(nonnull impeller::AiksContext*)aiks_context;
+
++ (sk_sp<flutter::DlImage>)wrapRGBA16FloatTexture:(nonnull id<MTLTexture>)rgbaTex
+                                      aiksContext:(nonnull impeller::AiksContext*)aiks_context;
 
 @end
 

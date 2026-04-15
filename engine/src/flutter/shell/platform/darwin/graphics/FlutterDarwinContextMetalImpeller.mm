@@ -26,8 +26,12 @@ static std::shared_ptr<impeller::ContextMTL> CreateImpellerContext(
       std::make_shared<fml::NonOwnedMapping>(impeller_framebuffer_blend_shaders_data,
                                              impeller_framebuffer_blend_shaders_length),
   };
+  // Use F16 for all render targets so HDR values >1.0 are preserved throughout
+  // the pipeline (intermediate MSAA resolve, snapshots, subpasses). Without this,
+  // the default BGRA8 format clamps values to [0,1], destroying EDR highlights.
   return impeller::ContextMTL::Create(flags, shader_mappings, is_gpu_disabled_sync_switch,
-                                      "Impeller Library");
+                                      "Impeller Library",
+                                      impeller::PixelFormat::kR16G16B16A16Float);
 }
 
 @implementation FlutterDarwinContextMetalImpeller

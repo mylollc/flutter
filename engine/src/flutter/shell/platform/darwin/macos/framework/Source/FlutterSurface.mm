@@ -75,8 +75,14 @@
 }
 
 + (IOSurfaceRef)createIOSurfaceWithSize:(CGSize)size {
-  unsigned pixelFormat = kCVPixelFormatType_32BGRA;
-  unsigned bytesPerElement = 4;
+  // F16 compositing surface. Allows HDR external textures (values >1.0)
+  // to render directly without a separate overlay CALayer. Paired with
+  // kCGColorSpaceExtendedSRGB (gamma-encoded, not linear) so Skia's alpha
+  // blending produces the same visual results as BGRA8. A linear color
+  // space causes visible dimming on semi-transparent UI elements because
+  // alpha compositing in linear light is perceptually darker at midtones.
+  unsigned pixelFormat = kCVPixelFormatType_64RGBAHalf;
+  unsigned bytesPerElement = 8;
 
   size_t bytesPerRow = IOSurfaceAlignProperty(kIOSurfaceBytesPerRow, size.width * bytesPerElement);
   size_t totalBytes = IOSurfaceAlignProperty(kIOSurfaceAllocSize, size.height * bytesPerRow);
@@ -90,7 +96,10 @@
   };
 
   IOSurfaceRef res = IOSurfaceCreate((CFDictionaryRef)options);
-  IOSurfaceSetValue(res, kIOSurfaceColorSpace, kCGColorSpaceSRGB);
+  // Extended sRGB: gamma-encoded sRGB transfer function with values >1.0
+  // allowed for HDR/EDR. Core Animation interprets values the same way as
+  // standard sRGB for the [0,1] range; values >1.0 map to EDR highlights.
+  IOSurfaceSetValue(res, kIOSurfaceColorSpace, kCGColorSpaceExtendedSRGB);
   return res;
 }
 
@@ -98,13 +107,12 @@
                                        size:(CGSize)size
                                      device:(id<MTLDevice>)device {
   MTLTextureDescriptor* textureDescriptor =
-      [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+      [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA16Float
                                                          width:size.width
                                                         height:size.height
                                                      mipmapped:NO];
   textureDescriptor.usage =
       MTLTextureUsageShaderRead | MTLTextureUsageRenderTarget | MTLTextureUsageShaderWrite;
-  // plane = 0 for BGRA.
   return [device newTextureWithDescriptor:textureDescriptor iosurface:surface plane:0];
 }
 

@@ -31,6 +31,9 @@
     [self setWantsLayer:YES];
     [self setBackgroundColor:[NSColor blackColor]];
     [self setLayerContentsRedrawPolicy:NSViewLayerContentsRedrawDuringViewResize];
+    // Enable EDR on the view so F16 backing store values >1.0 display as
+    // brighter-than-SDR-white on capable displays.
+    self.layer.wantsExtendedDynamicRangeContent = YES;
     _viewIdentifier = viewIdentifier;
     _viewDelegate = delegate;
     _surfaceManager = [[FlutterSurfaceManager alloc] initWithDevice:device

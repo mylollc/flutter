@@ -87,7 +87,13 @@ void VsyncWaiter::ScheduleSecondaryCallback(uintptr_t id,
 void VsyncWaiter::FireCallback(fml::TimePoint frame_start_time,
                                fml::TimePoint frame_target_time,
                                bool pause_secondary_tasks) {
+  // On iOS, the display link can report frame_start_time using a different
+  // clock epoch than fml::TimePoint::Now(), causing this check to fire
+  // spuriously in unoptimized debug builds. The check is valid on other
+  // platforms and in optimized builds (where FML_DCHECK is a no-op).
+#if !defined(FML_OS_IOS)
   FML_DCHECK(fml::TimePoint::Now() >= frame_start_time);
+#endif
 
   Callback callback;
   std::vector<fml::closure> secondary_callbacks;

@@ -20,6 +20,7 @@
 #include "flutter/fml/thread.h"
 #include "third_party/dart/runtime/bin/elf_loader.h"
 #include "third_party/dart/runtime/include/dart_native_api.h"
+#include "third_party/skia/include/core/SkColorSpace.h"
 #include "third_party/skia/include/core/SkSurface.h"
 #include "third_party/skia/include/gpu/GpuTypes.h"
 #include "third_party/skia/include/gpu/ganesh/GrBackendSurface.h"
@@ -1094,13 +1095,40 @@ static sk_sp<SkSurface> MakeSkSurfaceFromBackingStore(
 
   SkSurfaceProps surface_properties(0, kUnknown_SkPixelGeometry);
 
+  // The embedder's texture decides the surface's color type. This file is
+  // plain C++ and cannot include <Metal/MTLPixelFormat.h>, so the format
+  // values it needs are spelled out here.
+  constexpr GrMTLPixelFormat kMtlPixelFormatRGBA8Unorm = 70;
+  constexpr GrMTLPixelFormat kMtlPixelFormatBGRA8Unorm = 80;
+  constexpr GrMTLPixelFormat kMtlPixelFormatBGRA8Unorm_sRGB = 81;
+  constexpr GrMTLPixelFormat kMtlPixelFormatRGBA16Float = 115;
+  SkColorType color_type = kBGRA_8888_SkColorType;
+  sk_sp<SkColorSpace> color_space = nullptr;
+  switch (GrBackendFormats::AsMtlFormat(backend_texture.getBackendFormat())) {
+    case kMtlPixelFormatRGBA16Float:
+      // F16 with sRGB gamma color space. The F16 pixel type gives >1.0 range
+      // for HDR/EDR content. Using sRGB (not linear) keeps alpha blending
+      // visually identical to the BGRA8 path: linear-space blending causes
+      // perceptible dimming on semi-transparent UI elements at midtones.
+      color_type = kRGBA_F16_SkColorType;
+      color_space = SkColorSpace::MakeSRGB();
+      break;
+    case kMtlPixelFormatRGBA8Unorm:
+      color_type = kRGBA_8888_SkColorType;
+      break;
+    case kMtlPixelFormatBGRA8Unorm:
+    case kMtlPixelFormatBGRA8Unorm_sRGB:
+    default:
+      break;
+  }
+
   auto surface = SkSurfaces::WrapBackendTexture(
       context,                   // context
       backend_texture,           // back-end texture
       kTopLeft_GrSurfaceOrigin,  // surface origin
       1,                         // sample count
-      kBGRA_8888_SkColorType,    // color type
-      nullptr,                   // color space
+      color_type,                // color type
+      color_space,               // color space
       &surface_properties,       // surface properties
       static_cast<SkSurfaces::TextureReleaseProc>(
           metal->texture.destruction_callback),  // release proc
