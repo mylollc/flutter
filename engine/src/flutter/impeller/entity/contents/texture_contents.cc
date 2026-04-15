@@ -9,6 +9,7 @@
 #include <utility>
 
 #include "impeller/core/formats.h"
+#include "impeller/core/texture_descriptor.h"
 #include "impeller/entity/contents/content_context.h"
 #include "impeller/entity/entity.h"
 #include "impeller/entity/texture_fill.frag.h"
@@ -102,6 +103,34 @@ std::optional<Snapshot> TextureContents::RenderToSnapshot(
        .coverage_expansion = options.coverage_expansion});
 }
 
+// Computes the gamut conversion matrix rows and whether gamma encoding is
+// needed for the given source color space targeting an sRGB gamma surface.
+//
+// Gamut:    kLinearDisplayP3 / kDisplayP3 → P3→sRGB matrix
+//           everything else                → identity
+// Gamma:    kLinearDisplayP3 / kLinearP3Native → encode (source is linear)
+//           everything else                    → no encode (source is gamma)
+static void GetColorTransform(ColorSpace source,
+                              Vector3& row0,
+                              Vector3& row1,
+                              Vector3& row2,
+                              bool& needs_gamma_encode) {
+  constexpr Vector3 kP3ToSRGBRow0 = {1.2249401f, -0.2249402f, 0.0f};
+  constexpr Vector3 kP3ToSRGBRow1 = {-0.0420569f, 1.0420571f, 0.0f};
+  constexpr Vector3 kP3ToSRGBRow2 = {-0.0196376f, -0.0786507f, 1.0982884f};
+  constexpr Vector3 kIdentityRow0 = {1.0f, 0.0f, 0.0f};
+  constexpr Vector3 kIdentityRow1 = {0.0f, 1.0f, 0.0f};
+  constexpr Vector3 kIdentityRow2 = {0.0f, 0.0f, 1.0f};
+
+  const bool is_p3 = (source == ColorSpace::kLinearDisplayP3 ||
+                      source == ColorSpace::kDisplayP3);
+  row0 = is_p3 ? kP3ToSRGBRow0 : kIdentityRow0;
+  row1 = is_p3 ? kP3ToSRGBRow1 : kIdentityRow1;
+  row2 = is_p3 ? kP3ToSRGBRow2 : kIdentityRow2;
+  needs_gamma_encode = (source == ColorSpace::kLinearDisplayP3 ||
+                        source == ColorSpace::kLinearP3Native);
+}
+
 bool TextureContents::Render(const ContentContext& renderer,
                              const Entity& entity,
                              RenderPass& pass) const {
@@ -176,6 +205,12 @@ bool TextureContents::Render(const ContentContext& renderer,
   pass.SetVertexBuffer(vertex_buffer);
   VS::BindFrameInfo(pass, data_host_buffer.EmplaceUniform(frame_info));
 
+  // Compute the color transform (gamut conversion + gamma flag).
+  Vector3 color_row0, color_row1, color_row2;
+  bool needs_gamma_encode = false;
+  GetColorTransform(texture_->GetTextureDescriptor().color_space,
+                    color_row0, color_row1, color_row2, needs_gamma_encode);
+
   if (strict_source_rect_enabled_) {
     // For a strict source rect, shrink the texture coordinate range by half a
     // texel to ensure that linear filtering does not sample anything outside
@@ -186,6 +221,10 @@ bool TextureContents::Render(const ContentContext& renderer,
     FSStrict::FragInfo frag_info;
     frag_info.source_rect = Vector4(strict_texture_coords.GetLTRB());
     frag_info.alpha = GetOpacity();
+    frag_info.gamma_encode = needs_gamma_encode ? 1.0f : 0.0f;
+    frag_info.color_row0 = color_row0;
+    frag_info.color_row1 = color_row1;
+    frag_info.color_row2 = color_row2;
     FSStrict::BindFragInfo(pass, data_host_buffer.EmplaceUniform((frag_info)));
     FSStrict::BindTextureSampler(
         pass, texture_,
@@ -218,6 +257,10 @@ bool TextureContents::Render(const ContentContext& renderer,
   } else {
     FS::FragInfo frag_info;
     frag_info.alpha = GetOpacity();
+    frag_info.gamma_encode = needs_gamma_encode ? 1.0f : 0.0f;
+    frag_info.color_row0 = color_row0;
+    frag_info.color_row1 = color_row1;
+    frag_info.color_row2 = color_row2;
     FS::BindFragInfo(pass, data_host_buffer.EmplaceUniform((frag_info)));
     FS::BindTextureSampler(
         pass, texture_,

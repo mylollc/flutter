@@ -272,9 +272,11 @@ bool RuntimeEffectContents::Render(const ContentContext& renderer,
         }
         case kFloat: {
           FML_DCHECK(renderer.GetContext()->GetBackendType() !=
-                     Context::BackendType::kVulkan)
+                         Context::BackendType::kVulkan &&
+                     renderer.GetContext()->GetBackendType() !=
+                         Context::BackendType::kMetal)
               << "Uniform " << uniform.name
-              << " had unexpected type kFloat for Vulkan backend.";
+              << " had unexpected type kFloat for Vulkan/Metal backend.";
 
           size_t alignment =
               std::max(uniform.bit_width / 8,
@@ -296,9 +298,15 @@ bool RuntimeEffectContents::Render(const ContentContext& renderer,
         }
         case kStruct: {
           FML_DCHECK(renderer.GetContext()->GetBackendType() ==
-                     Context::BackendType::kVulkan);
+                         Context::BackendType::kVulkan ||
+                     renderer.GetContext()->GetBackendType() ==
+                         Context::BackendType::kMetal);
           ShaderUniformSlot uniform_slot;
           uniform_slot.binding = uniform.location;
+          // Metal uses ext_res_0 as the [[buffer(N)]] index. The MSL compiler
+          // remaps the SPIR-V binding to a sequential buffer index starting
+          // after any loose float uniforms, which matches buffer_location.
+          uniform_slot.ext_res_0 = buffer_location;
           uniform_slot.name = uniform.name.c_str();
 
           pass.BindResource(ShaderStage::kFragment,

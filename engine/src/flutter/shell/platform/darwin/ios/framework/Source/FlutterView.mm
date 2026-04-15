@@ -117,7 +117,7 @@ FLUTTER_ASSERT_ARC
     CAMetalLayer* layer = (CAMetalLayer*)self.layer;
     return layer.pixelFormat;
   }
-  return MTLPixelFormatBGRA8Unorm;
+  return MTLPixelFormatRGBA16Float;
 }
 - (BOOL)isWideGamutSupported {
   FML_DCHECK(self.screen);
@@ -155,16 +155,6 @@ FLUTTER_ASSERT_ARC
   return self;
 }
 
-static void PrintWideGamutWarningOnce() {
-  static BOOL did_print = NO;
-  if (did_print) {
-    return;
-  }
-  FML_DLOG(WARNING) << "Rendering wide gamut colors is turned on but isn't "
-                       "supported, downgrading the color gamut to sRGB.";
-  did_print = YES;
-}
-
 - (void)layoutSubviews {
   if ([self.layer isKindOfClass:[CAMetalLayer class]]) {
 // It is a known Apple bug that CAMetalLayer incorrectly reports its supported
@@ -178,13 +168,9 @@ static void PrintWideGamutWarningOnce() {
     layer.contentsScale = screenScale;
     layer.rasterizationScale = screenScale;
     layer.framebufferOnly = flutter::Settings::kSurfaceDataAccessible ? NO : YES;
-    if (_isWideGamutEnabled && self.isWideGamutSupported) {
-      fml::CFRef<CGColorSpaceRef> srgb(CGColorSpaceCreateWithName(kCGColorSpaceExtendedSRGB));
-      layer.colorspace = srgb;
-      layer.pixelFormat = MTLPixelFormatBGRA10_XR;
-    } else if (_isWideGamutEnabled && !self.isWideGamutSupported) {
-      PrintWideGamutWarningOnce();
-    }
+    // Pixel format, color space, and EDR flags are set by FlutterMetalLayer.init.
+    // F16 + ExtendedSRGB is a superset of the previous BGRA10_XR wide gamut config
+    // and additionally enables EDR headroom allocation for HDR content.
   }
 
   [super layoutSubviews];

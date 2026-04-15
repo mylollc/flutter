@@ -215,8 +215,21 @@ std::unique_ptr<SurfaceFrame> GPUSurfaceMetalSkia::AcquireFrameFromMTLTexture(
     return nullptr;
   }
 
+  // Detect RGBA16Float textures (for HDR/EDR support) and use the correct
+  // Skia color type so values >1.0 are preserved during compositing.
+  SkColorType color_type = kBGRA_8888_SkColorType;
+  sk_sp<SkColorSpace> color_space = nullptr;
+  if (mtl_texture.pixelFormat == MTLPixelFormatRGBA16Float) {
+    color_type = kRGBA_F16_SkColorType;
+    // sRGB gamma (not linear) keeps alpha blending visually identical to
+    // the BGRA8 path. Linear-space blending causes perceptible dimming on
+    // semi-transparent UI elements at midtones. The IOSurface is tagged
+    // with kCGColorSpaceExtendedSRGB, which uses the same transfer function.
+    color_space = SkColorSpace::MakeSRGB();
+  }
+
   sk_sp<SkSurface> surface = CreateSurfaceFromMetalTexture(
-      context_.get(), mtl_texture, kTopLeft_GrSurfaceOrigin, kBGRA_8888_SkColorType, nullptr,
+      context_.get(), mtl_texture, kTopLeft_GrSurfaceOrigin, color_type, std::move(color_space),
       nullptr, static_cast<SkSurfaces::TextureReleaseProc>(texture.destruction_callback),
       texture.destruction_context);
 

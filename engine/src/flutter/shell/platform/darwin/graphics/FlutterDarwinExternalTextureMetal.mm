@@ -136,6 +136,8 @@ FLUTTER_ASSERT_ARC
     image = [self wrapNV12ExternalPixelBuffer:pixelBuffer context:context];
   } else if (_pixelFormat == kCVPixelFormatType_32BGRA) {
     image = [self wrapBGRAExternalPixelBuffer:pixelBuffer context:context];
+  } else if (_pixelFormat == kCVPixelFormatType_64RGBAHalf) {
+    image = [self wrapRGBA16FloatExternalPixelBuffer:pixelBuffer context:context];
   } else {
     FML_LOG(ERROR) << "Unsupported pixel format: " << _pixelFormat;
     return nullptr;
@@ -265,6 +267,51 @@ FLUTTER_ASSERT_ARC
   return flutter::DlImage::Make(skImage);
 }
 
+- (sk_sp<flutter::DlImage>)wrapRGBA16FloatExternalPixelBuffer:(CVPixelBufferRef)pixelBuffer
+                                                      context:
+                                                          (flutter::Texture::PaintContext&)context {
+  SkISize textureSize =
+      SkISize::Make(CVPixelBufferGetWidth(pixelBuffer), CVPixelBufferGetHeight(pixelBuffer));
+  CVMetalTextureRef metalTexture = nullptr;
+  CVReturn cvReturn =
+      CVMetalTextureCacheCreateTextureFromImage(/*allocator=*/kCFAllocatorDefault,
+                                                /*textureCache=*/_textureCache,
+                                                /*sourceImage=*/pixelBuffer,
+                                                /*textureAttributes=*/nullptr,
+                                                /*pixelFormat=*/MTLPixelFormatRGBA16Float,
+                                                /*width=*/textureSize.width(),
+                                                /*height=*/textureSize.height(),
+                                                /*planeIndex=*/0u,
+                                                /*texture=*/&metalTexture);
+
+  if (cvReturn != kCVReturnSuccess) {
+    FML_DLOG(ERROR) << "Could not create Metal texture from RGBA16Float pixel buffer: CVReturn "
+                    << cvReturn;
+    return nullptr;
+  }
+
+  id<MTLTexture> rgbaTex = CVMetalTextureGetTexture(metalTexture);
+  CVBufferRelease(metalTexture);
+
+  if (_enableImpeller) {
+    return [FlutterDarwinExternalTextureImpellerImageWrapper
+        wrapRGBA16FloatTexture:rgbaTex
+                   aiksContext:context.aiks_context];
+  }
+
+  auto skImage =
+      [FlutterDarwinExternalTextureSkImageWrapper wrapRGBA16FloatTexture:rgbaTex
+                                                               grContext:context.gr_context
+                                                                   width:textureSize.width()
+                                                                  height:textureSize.height()];
+  if (!skImage) {
+    return nullptr;
+  }
+
+  // This image should not escape local use by this flutter::Texture implementation
+  return flutter::DlImage::Make(skImage);
+}
+
 @end
 
 @implementation FlutterDarwinExternalTextureSkImageWrapper
@@ -321,6 +368,35 @@ FLUTTER_ASSERT_ARC
                                      /*releaseContext*/ nullptr);
 #endif  //  SLIMPELLER
 }
+
++ (sk_sp<SkImage>)wrapRGBA16FloatTexture:(id<MTLTexture>)rgbaTex
+                               grContext:(nonnull GrDirectContext*)grContext
+                                   width:(size_t)width
+                                  height:(size_t)height {
+#if SLIMPELLER
+  return nullptr;
+#else   // SLIMPELLER
+
+  GrMtlTextureInfo skiaTextureInfo;
+  skiaTextureInfo.fTexture.retain((__bridge GrMTLHandle)rgbaTex);
+
+  GrBackendTexture skiaBackendTexture =
+      GrBackendTextures::MakeMtl(width, height, skgpu::Mipmapped::kNo, skiaTextureInfo);
+
+  // Texture contains linear Display P3 values from Apple's image decoders.
+  // Skia converts to the sRGB compositing surface: P3→sRGB gamut matrix +
+  // sRGB OETF. Linear TRC means values >1.0 pass through the gamut matrix
+  // unclamped, preserving EDR highlights.
+  auto p3Linear = SkColorSpace::MakeRGB(SkNamedTransferFn::kLinear,
+                                         SkNamedGamut::kDisplayP3);
+
+  return SkImages::BorrowTextureFrom(grContext, skiaBackendTexture, kTopLeft_GrSurfaceOrigin,
+                                     kRGBA_F16_SkColorType, kPremul_SkAlphaType,
+                                     std::move(p3Linear),
+                                     /*releaseProc*/ nullptr,
+                                     /*releaseContext*/ nullptr);
+#endif  //  SLIMPELLER
+}
 @end
 
 @implementation FlutterDarwinExternalTextureImpellerImageWrapper
@@ -357,6 +433,21 @@ FLUTTER_ASSERT_ARC
   desc.format = impeller::PixelFormat::kB8G8R8A8UNormInt;
   desc.size = impeller::ISize(rgbaTex.width, rgbaTex.height);
   desc.mip_count = 1;
+  auto texture = impeller::TextureMTL::Wrapper(desc, rgbaTex);
+  texture->SetCoordinateSystem(impeller::TextureCoordinateSystem::kUploadFromHost);
+  return impeller::DlImageImpeller::Make(texture);
+}
+
++ (sk_sp<flutter::DlImage>)wrapRGBA16FloatTexture:(id<MTLTexture>)rgbaTex
+                                      aiksContext:(nonnull impeller::AiksContext*)aiks_context {
+  impeller::TextureDescriptor desc;
+  desc.storage_mode = impeller::StorageMode::kDevicePrivate;
+  desc.format = impeller::PixelFormat::kR16G16B16A16Float;
+  desc.size = impeller::ISize(rgbaTex.width, rgbaTex.height);
+  desc.mip_count = 1;
+  // Surface is gamma sRGB (ExtendedSRGB). Texture is linear P3.
+  // Apply P3→sRGB gamut matrix + sRGB gamma encoding.
+  desc.color_space = impeller::ColorSpace::kLinearDisplayP3;
   auto texture = impeller::TextureMTL::Wrapper(desc, rgbaTex);
   texture->SetCoordinateSystem(impeller::TextureCoordinateSystem::kUploadFromHost);
   return impeller::DlImageImpeller::Make(texture);

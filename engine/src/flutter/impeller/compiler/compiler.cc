@@ -128,6 +128,27 @@ static CompilerBackend CreateMSLCompiler(
     sampler_offset++;
   }
 
+  // For runtime stage Metal shaders, the SPIR-V was compiled with Vulkan
+  // target so loose float uniforms are wrapped into a UBO. Bind it explicitly
+  // so the generated MSL uses a single struct buffer instead of per-float
+  // [[buffer(N)]] parameters (which would exceed Metal's 31 binding limit).
+  // Non-runtime Metal shaders manage their own UBO bindings through the
+  // existing pipeline, so this must be scoped to kRuntimeStageMetal only.
+  if (source_options.target_platform == TargetPlatform::kRuntimeStageMetal) {
+    auto ubos = sl_compiler->get_shader_resources().uniform_buffers;
+    for (auto& ubo : ubos) {
+      sl_compiler->add_msl_resource_binding(
+          {.stage = execution_model,
+           .desc_set = sl_compiler->get_decoration(ubo.id,
+                                                   spv::DecorationDescriptorSet),
+           .binding =
+               sl_compiler->get_decoration(ubo.id, spv::DecorationBinding),
+           .count = 1u,
+           .msl_buffer = buffer_offset});
+      buffer_offset++;
+    }
+  }
+
   return CompilerBackend(sl_compiler);
 }
 
@@ -352,7 +373,20 @@ Compiler::Compiler(const std::shared_ptr<const fml::Mapping>& source_mapping,
       }
       spirv_options.target = target;
     } break;
-    case TargetPlatform::kRuntimeStageMetal:
+    case TargetPlatform::kRuntimeStageMetal: {
+      // Use Vulkan SPIR-V target with relaxed rules so shaderc wraps loose
+      // uniforms into a UBO. This avoids exceeding Metal's 31 buffer binding
+      // limit when shaders have many float uniforms (e.g. edit shader with 82).
+      SPIRVCompilerTargetEnv target;
+
+      target.env = shaderc_target_env::shaderc_target_env_vulkan;
+      target.version = shaderc_env_version::shaderc_env_version_vulkan_1_1;
+      target.spirv_version = shaderc_spirv_version::shaderc_spirv_version_1_3;
+
+      spirv_options.target = target;
+      spirv_options.macro_definitions.push_back("IMPELLER_GRAPHICS_BACKEND");
+      spirv_options.relaxed_vulkan_rules = true;
+    } break;
     case TargetPlatform::kRuntimeStageGLES:
     case TargetPlatform::kRuntimeStageGLES3: {
       SPIRVCompilerTargetEnv target;
@@ -363,11 +397,7 @@ Compiler::Compiler(const std::shared_ptr<const fml::Mapping>& source_mapping,
 
       spirv_options.target = target;
       spirv_options.macro_definitions.push_back("IMPELLER_GRAPHICS_BACKEND");
-      if (source_options.target_platform == TargetPlatform::kRuntimeStageGLES ||
-          source_options.target_platform ==
-              TargetPlatform::kRuntimeStageGLES3) {
-        spirv_options.macro_definitions.push_back("IMPELLER_TARGET_OPENGLES");
-      }
+      spirv_options.macro_definitions.push_back("IMPELLER_TARGET_OPENGLES");
     } break;
     case TargetPlatform::kSkSL: {
       SPIRVCompilerTargetEnv target;

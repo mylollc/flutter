@@ -168,6 +168,10 @@ static void UpdateContentSubLayers(CALayer* layer,
   }
   while (_layers.count < _frontSurfaces.count) {
     CALayer* layer = [CALayer layer];
+    // F16 backing store layers: enable EDR so values >1.0 display as
+    // extended dynamic range highlights on capable displays.
+    layer.wantsExtendedDynamicRangeContent = YES;
+    layer.contentsFormat = kCAContentsFormatRGBA16Float;
     [_containingLayer addSublayer:layer];
     [_layers addObject:layer];
   }

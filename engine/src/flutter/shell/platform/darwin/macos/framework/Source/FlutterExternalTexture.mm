@@ -45,6 +45,8 @@
     return [self populateTextureFromYUVAPixelBuffer:pixelBuffer textureOut:textureOut];
   } else if (pixel_format == kCVPixelFormatType_32BGRA) {
     return [self populateTextureFromRGBAPixelBuffer:pixelBuffer textureOut:textureOut];
+  } else if (pixel_format == kCVPixelFormatType_64RGBAHalf) {
+    return [self populateTextureFromRGBA16FloatPixelBuffer:pixelBuffer textureOut:textureOut];
   } else {
     NSLog(@"Unsupported pixel format: %d", pixel_format);
     return NO;
@@ -105,6 +107,40 @@
   textureOut->yuv_color_space = pixel_format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange
                                     ? FlutterMetalExternalTextureYUVColorSpace::kBT601LimitedRange
                                     : FlutterMetalExternalTextureYUVColorSpace::kBT601FullRange;
+
+  return YES;
+}
+
+- (BOOL)populateTextureFromRGBA16FloatPixelBuffer:(nonnull CVPixelBufferRef)pixelBuffer
+                                       textureOut:(nonnull FlutterMetalExternalTexture*)textureOut {
+  SkISize textureSize =
+      SkISize::Make(CVPixelBufferGetWidth(pixelBuffer), CVPixelBufferGetHeight(pixelBuffer));
+
+  CVMetalTextureRef cvMetalTexture = nullptr;
+  CVReturn cvReturn =
+      CVMetalTextureCacheCreateTextureFromImage(/*allocator=*/kCFAllocatorDefault,
+                                                /*textureCache=*/_darwinMetalContext.textureCache,
+                                                /*sourceImage=*/pixelBuffer,
+                                                /*textureAttributes=*/nullptr,
+                                                /*pixelFormat=*/MTLPixelFormatRGBA16Float,
+                                                /*width=*/textureSize.width(),
+                                                /*height=*/textureSize.height(),
+                                                /*planeIndex=*/0u,
+                                                /*texture=*/&cvMetalTexture);
+
+  if (cvReturn != kCVReturnSuccess) {
+    NSLog(@"Could not create Metal texture from RGBA16Float pixel buffer: CVReturn %d", cvReturn);
+    return NO;
+  }
+
+  _textures = {(__bridge FlutterMetalTextureHandle)CVMetalTextureGetTexture(cvMetalTexture)};
+  CVBufferRelease(cvMetalTexture);
+
+  textureOut->num_textures = 1;
+  textureOut->height = textureSize.height();
+  textureOut->width = textureSize.width();
+  textureOut->pixel_format = FlutterMetalExternalTexturePixelFormat::kRGBA;
+  textureOut->textures = _textures.data();
 
   return YES;
 }

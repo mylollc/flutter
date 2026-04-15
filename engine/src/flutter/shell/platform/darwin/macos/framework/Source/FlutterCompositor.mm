@@ -154,8 +154,14 @@ void FlutterCompositor::ViewPresenter::PresentPlatformViews(
       continue;
     }
     const auto& platform_view = std::get<PlatformViewLayer>(layer);
+
+    // Skip layers whose platform view is missing. PresentPlatformView returns
+    // nil in that case; calling addObject with nil would raise.
     FlutterMutatorView* mutator_view =
         PresentPlatformView(default_base_view, platform_view, i, platform_view_controller);
+    if (!mutator_view) {
+      continue;
+    }
     [present_mutators addObject:mutator_view];
 
     // Gather all overlay regions above this mutator view.
@@ -203,8 +209,9 @@ FlutterMutatorView* FlutterCompositor::ViewPresenter::PresentPlatformView(
 
   int64_t platform_view_id = layer.identifier();
   NSView* platform_view = [platform_view_controller platformViewWithID:platform_view_id];
-
-  FML_DCHECK(platform_view) << "Platform view not found for id: " << platform_view_id;
+  if (!platform_view) {
+    return nil;
+  }
 
   if (cursor_coordinator_ == nil) {
     cursor_coordinator_ = [[FlutterCursorCoordinator alloc] initWithFlutterView:default_base_view];

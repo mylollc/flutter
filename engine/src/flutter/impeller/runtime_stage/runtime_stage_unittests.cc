@@ -301,6 +301,46 @@ TEST_P(RuntimeStageTest, CanReadUniformsSamplerAfterUBO) {
   EXPECT_EQ(sampler_uniform->binding, 65u);
 }
 
+// Verify that shaders with >31 float uniforms produce a UBO struct on both
+// Metal and Vulkan. Metal has a 31 buffer binding limit; without UBO wrapping,
+// each uniform gets its own [[buffer(N)]] and the shader fails to compile.
+TEST_P(RuntimeStageTest, ManyUniformsProduceUBOStruct) {
+  if (GetBackend() != PlaygroundBackend::kVulkan &&
+      GetBackend() != PlaygroundBackend::kMetal) {
+    GTEST_SKIP() << "UBO wrapping only applies to Vulkan and Metal";
+  }
+  const std::shared_ptr<fml::Mapping> fixture =
+      flutter::testing::OpenFixtureAsMapping("many_uniforms.frag.iplr");
+  ASSERT_TRUE(fixture);
+  ASSERT_GT(fixture->GetSize(), 0u);
+  auto stages = RuntimeStage::DecodeRuntimeStages(fixture);
+  ABSL_ASSERT_OK(stages);
+  auto stage =
+      stages.value()[PlaygroundBackendToRuntimeStageBackend(GetBackend())];
+  ASSERT_TRUE(stage);
+
+  // Should have 1 sampler + 1 UBO struct (not 35 individual floats).
+  EXPECT_EQ(stage->GetUniforms().size(), 2u);
+
+  auto sampler = stage->GetUniform("u_texture");
+  ASSERT_NE(sampler, nullptr);
+  EXPECT_EQ(sampler->type, RuntimeUniformType::kSampledImage);
+
+  auto ubo = stage->GetUniform(RuntimeStage::kVulkanUBOName);
+  ASSERT_NE(ubo, nullptr);
+  EXPECT_EQ(ubo->type, RuntimeUniformType::kStruct);
+  // 35 scalar floats, no vec2/vec4 so no padding needed in std140.
+  EXPECT_EQ(ubo->struct_float_count, 35u);
+
+  // All entries in struct_layout should be 1 (float data, no padding)
+  // since all uniforms are scalar floats with 4-byte alignment.
+  // std140 may add padding to round up to 16-byte struct alignment at the end.
+  for (size_t i = 0; i < ubo->struct_float_count; i++) {
+    EXPECT_EQ(ubo->struct_layout[i], 1u)
+        << "Expected float at layout index " << i;
+  }
+}
+
 TEST_P(RuntimeStageTest, CanRegisterStage) {
   const std::shared_ptr<fml::Mapping> fixture =
       flutter::testing::OpenFixtureAsMapping("ink_sparkle.frag.iplr");

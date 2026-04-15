@@ -372,22 +372,25 @@ std::shared_ptr<RuntimeStageData::Shader> Reflector::GenerateRuntimeStageData()
     uniform_description.columns = spir_type.columns;
     uniform_description.bit_width = spir_type.width;
     uniform_description.array_elements = GetArrayElements(spir_type);
-    FML_CHECK(data->backend != RuntimeStageBackend::kVulkan ||
+    FML_CHECK((data->backend != RuntimeStageBackend::kVulkan &&
+               data->backend != RuntimeStageBackend::kMetal) ||
               spir_type.basetype ==
                   spirv_cross::SPIRType::BaseType::SampledImage)
-        << "Vulkan runtime effect had unexpected uniforms outside of the "
+        << "Vulkan/Metal runtime effect had unexpected uniforms outside of the "
            "uniform buffer object.";
     data->uniforms.emplace_back(std::move(uniform_description));
   }
 
   const auto ubos = compiler_->get_shader_resources().uniform_buffers;
-  if (data->backend == RuntimeStageBackend::kVulkan && !ubos.empty()) {
+  if ((data->backend == RuntimeStageBackend::kVulkan ||
+       data->backend == RuntimeStageBackend::kMetal) &&
+      !ubos.empty()) {
     if (ubos.size() != 1 && ubos[0].name != RuntimeStage::kVulkanUBOName) {
       VALIDATION_LOG << "Expected a single UBO resource named "
                         "'"
                      << RuntimeStage::kVulkanUBOName
                      << "' "
-                        "for Vulkan runtime stage backend.";
+                        "for Vulkan/Metal runtime stage backend.";
       return nullptr;
     }
 

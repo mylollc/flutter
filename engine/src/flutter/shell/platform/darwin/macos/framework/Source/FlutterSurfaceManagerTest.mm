@@ -3,6 +3,7 @@
 // found in the LICENSE file.
 
 #import <Cocoa/Cocoa.h>
+#import <IOSurface/IOSurface.h>
 #import <Metal/Metal.h>
 
 #import "flutter/shell/platform/darwin/macos/framework/Source/FlutterSurface.h"
@@ -73,6 +74,41 @@ TEST(FlutterSurfaceManager, MetalTextureSizeMatchesSurfaceSize) {
   id<MTLTexture> metalTexture = (__bridge id)texture.texture;
   EXPECT_EQ(metalTexture.width, 100ul);
   EXPECT_EQ(metalTexture.height, 50ul);
+  texture.destruction_callback(texture.user_data);
+}
+
+TEST(FlutterSurfaceManager, MetalTextureUsesRGBA16FloatPixelFormat) {
+  TestView* testView = [[TestView alloc] init];
+  FlutterSurfaceManager* surfaceManager = CreateSurfaceManager(testView);
+
+  auto surface = [surfaceManager surfaceForSize:CGSizeMake(100, 50)];
+  auto texture = surface.asFlutterMetalTexture;
+  id<MTLTexture> metalTexture = (__bridge id)texture.texture;
+  // F16 compositing surface: allows HDR values >1.0 to render directly.
+  EXPECT_EQ(metalTexture.pixelFormat, MTLPixelFormatRGBA16Float);
+  texture.destruction_callback(texture.user_data);
+}
+
+TEST(FlutterSurfaceManager, IOSurfaceUsesExtendedSRGBColorSpace) {
+  TestView* testView = [[TestView alloc] init];
+  FlutterSurfaceManager* surfaceManager = CreateSurfaceManager(testView);
+
+  auto surface = [surfaceManager surfaceForSize:CGSizeMake(100, 50)];
+
+  // Verify the IOSurface is tagged with extended sRGB. This uses the sRGB
+  // transfer function (gamma) with values >1.0 allowed for HDR/EDR content.
+  // Using sRGB gamma (not linear) keeps alpha blending visually identical
+  // to the previous BGRA8 path.
+  IOSurfaceRef ioSurface = surface.ioSurface;
+  ASSERT_TRUE(ioSurface != nullptr);
+
+  CFTypeRef colorSpaceValue =
+      IOSurfaceCopyValue(ioSurface, CFSTR("IOSurfaceColorSpace"));
+  ASSERT_TRUE(colorSpaceValue != nullptr);
+  EXPECT_TRUE(CFEqual(colorSpaceValue, kCGColorSpaceExtendedSRGB));
+  CFRelease(colorSpaceValue);
+
+  auto texture = surface.asFlutterMetalTexture;
   texture.destruction_callback(texture.user_data);
 }
 
@@ -296,6 +332,20 @@ TEST(FlutterSurfaceManager, LayerManagement) {
   [surfaceManager presentSurfaces:@[] atTime:0 notify:nil];
   EXPECT_EQ(testView.layer.sublayers.count, 0ul);
   EXPECT_TRUE(CGSizeEqualToSize(testView.presentedFrameSize, CGSizeMake(0, 0)));
+}
+
+// Verify that backing store layers have F16 EDR properties when created.
+TEST(FlutterSurfaceManager, BackingStoreLayersHaveF16EDRProperties) {
+  TestView* testView = [[TestView alloc] init];
+  FlutterSurfaceManager* surfaceManager = CreateSurfaceManager(testView);
+
+  auto surface = [surfaceManager surfaceForSize:CGSizeMake(100, 50)];
+  [surfaceManager presentSurfaces:@[ CreatePresentInfo(surface) ] atTime:0 notify:nil];
+
+  ASSERT_EQ(testView.layer.sublayers.count, 1ul);
+  CALayer* backingStoreLayer = testView.layer.sublayers[0];
+  EXPECT_TRUE(backingStoreLayer.wantsExtendedDynamicRangeContent);
+  EXPECT_TRUE([backingStoreLayer.contentsFormat isEqualToString:kCAContentsFormatRGBA16Float]);
 }
 
 }  // namespace flutter::testing
