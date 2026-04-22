@@ -4,8 +4,10 @@
 
 #include "flutter/shell/platform/android/image_external_texture.h"
 
+#include <android/hardware_buffer.h>
 #include <android/hardware_buffer_jni.h>
 #include <android/sensor.h>
+#include <unistd.h>
 
 #include "flutter/fml/platform/android/jni_util.h"
 #include "flutter/impeller/toolkit/android/proc_table.h"
@@ -95,6 +97,52 @@ JavaLocalRef ImageExternalTexture::AcquireLatestImage() {
       jni_facade_->ImageProducerTextureEntryAcquireLatestImage(
           JavaLocalRef(image_texture_entry_));
   return image_java;
+}
+
+AcquiredHardwareBuffer ImageExternalTexture::AcquireLatestHardwareBuffer() {
+  return jni_facade_->ImageProducerTextureEntryAcquireLatestHardwareBuffer(
+      JavaLocalRef(image_texture_entry_));
+}
+
+void ImageExternalTexture::ReleaseAcquiredHardwareBuffer(
+    const AcquiredHardwareBuffer& handle) {
+  if (handle.acquire_fence_fd >= 0) {
+    // Safety-net close only — the VK Impeller path consumes the fd via
+    // `WaitOnAndCloseSyncFd` in `ProcessFrame` before the sampling
+    // barrier and zeroes this field, so this branch should not fire in
+    // practice. If a future backend forwards a non-negative fd here
+    // without consuming it upstream, we at least avoid the leak.
+    ::close(handle.acquire_fence_fd);
+  }
+  if (handle.release_ack_fd >= 0) {
+    // Safety-net signal+close. The VK Impeller path normally arms a
+    // completion callback that signals this fd when GPU sampling
+    // finishes, and zeroes it here. Reaching this branch with a valid
+    // fd means IngestHardwareBuffer errored before arming the
+    // callback; we signal so the producer doesn't block forever on its
+    // `poll(POLLIN)`.
+    const uint64_t one = 1;
+    (void)::write(handle.release_ack_fd, &one, sizeof(one));
+    ::close(handle.release_ack_fd);
+  }
+  if (handle.buffer != nullptr) {
+    // Drop the reference the engine transferred to us. The texture source
+    // (e.g. `AHBTextureSourceVK`) holds its own independent reference via
+    // `AHardwareBuffer_acquire` during construction, so the buffer stays
+    // alive for as long as Impeller needs it.
+    const auto& release =
+        impeller::android::GetProcTable().AHardwareBuffer_release;
+    if (release) {
+      release(handle.buffer);
+    } else {
+      // Not expected in practice — `AHardwareBuffer_release` is API 26+
+      // and the direct-AHB path itself is API 26+-gated. A missing proc
+      // here signals a malformed device environment; log rather than
+      // silently leaking the reference.
+      FML_LOG(WARNING)
+          << "AHardwareBuffer_release unavailable; leaking AHB reference.";
+    }
+  }
 }
 
 void ImageExternalTexture::CloseImage(const fml::jni::JavaRef<jobject>& image) {

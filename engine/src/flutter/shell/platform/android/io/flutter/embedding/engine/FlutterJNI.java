@@ -154,6 +154,39 @@ public class FlutterJNI {
   private static native void nativePrefetchDefaultFontManager();
 
   /**
+   * Release an {@code AHardwareBuffer*}, close its acquire fence fd, and
+   * signal+close its release-ack fd.
+   *
+   * <p>Used by {@link io.flutter.embedding.engine.renderer.FlutterRenderer
+   * .ImageTextureRegistryEntry} to free an {@code AHardwareBuffer} that was
+   * pushed via {@link io.flutter.view.TextureRegistry.ImageTextureEntry
+   * #pushHardwareBuffer(long, int, int)} and then superseded or released
+   * before the consumer could acquire it. Java cannot call the NDK
+   * {@code AHardwareBuffer_release} directly, so this bridges to the
+   * engine's native side.
+   *
+   * <p>The public entry point is a plain (non-{@code native}) instance
+   * method; the actual JNI call lives in {@link
+   * #nativeReleaseHardwareBuffer}. This layering keeps the method
+   * stubbable by the mockito-core subclass mock maker, which otherwise
+   * has trouble intercepting {@code native} methods. Tests can therefore
+   * simply {@code verify(mockFlutterJNI).releaseHardwareBuffer(...)}.
+   *
+   * <p>Safe to call with {@code ahbPtr == 0}, {@code acquireFenceFd == -1},
+   * or {@code releaseAckFd == -1}; the native side treats each as a no-op
+   * independently. When {@code releaseAckFd} is non-negative the native
+   * side writes 8 bytes to it (matching the producer's {@code eventfd}
+   * semantics) before closing so any producer still polling wakes up.
+   */
+  public void releaseHardwareBuffer(long ahbPtr, int acquireFenceFd, int releaseAckFd) {
+    nativeReleaseHardwareBuffer(ahbPtr, acquireFenceFd, releaseAckFd);
+  }
+
+  @Keep
+  private native void nativeReleaseHardwareBuffer(
+      long ahbPtr, int acquireFenceFd, int releaseAckFd);
+
+  /**
    * Prefetch the default font manager provided by txt::GetDefaultFontManager() which is a
    * process-wide singleton owned by Skia. Note that, the first call to txt::GetDefaultFontManager()
    * will take noticeable time, but later calls will return a reference to the preexisting font

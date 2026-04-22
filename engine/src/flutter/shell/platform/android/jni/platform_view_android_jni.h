@@ -14,6 +14,8 @@
 #include "flutter/shell/platform/android/surface/android_native_window.h"
 
 #if FML_OS_ANDROID
+#include <android/hardware_buffer.h>
+
 #include "flutter/fml/platform/android/scoped_java_ref.h"
 #endif
 
@@ -25,7 +27,34 @@ namespace flutter {
 using JavaLocalRef = fml::jni::ScopedJavaLocalRef<jobject>;
 #else
 using JavaLocalRef = std::nullptr_t;
+// Forward-declare the NDK opaque type on non-Android hosts so the
+// interface signatures below compile for host-side unit-test builds.
+// Members stay compile-only; nothing constructs an AHardwareBuffer off
+// Android.
+using AHardwareBuffer = struct AHardwareBuffer;
 #endif
+
+/// Plain-data handle for a raw `AHardwareBuffer` + its acquire fence +
+/// release-ack fd, returned by
+/// [PlatformViewAndroidJNI::ImageProducerTextureEntryAcquireLatestHardwareBuffer].
+///
+/// Ownership contract: the engine transfers one AHB reference to the
+/// consumer on acquisition. The consumer must eventually release it via
+/// `AHardwareBuffer_release`. Both fds (when not -1) are transferred too:
+///
+/// - `acquire_fence_fd`: consumer waits on it (or imports into a Vulkan
+///   semaphore) before sampling, then closes.
+/// - `release_ack_fd`: consumer signals it (`write(fd, &u64, 8)`, matching
+///   the producer's `eventfd`) when GPU sampling completes, then closes.
+///   This unblocks the producer so it can safely reuse the AHB. When
+///   the consumer never reaches the sampling path (early-return / error),
+///   it must still signal+close the ack fd — otherwise the producer
+///   polls forever.
+struct AcquiredHardwareBuffer {
+  AHardwareBuffer* buffer = nullptr;
+  int acquire_fence_fd = -1;
+  int release_ack_fd = -1;
+};
 
 //------------------------------------------------------------------------------
 /// Allows to call Java code running in the JVM from any thread. However, most
@@ -135,6 +164,26 @@ class PlatformViewAndroidJNI {
   ///
   virtual JavaLocalRef ImageProducerTextureEntryAcquireLatestImage(
       JavaLocalRef image_texture_entry) = 0;
+
+  //----------------------------------------------------------------------------
+  /// @brief      Acquire the latest raw `AHardwareBuffer` pushed via the
+  ///             direct-AHB path on `ImageTextureEntry`.
+  ///
+  ///             Returns an `AcquiredHardwareBuffer` with `buffer == nullptr`
+  ///             when no AHB is pending — the entry is either untouched, or
+  ///             operating on the legacy `Image`-based flow
+  ///             (`acquireLatestImage`). The returned AHB (when non-null) and
+  ///             fence fd (when not -1) are owned by the caller per the
+  ///             `AcquiredHardwareBuffer` contract.
+  ///
+  ///             Default implementation returns an empty handle so
+  ///             pre-direct-AHB test fakes and host-side stubs keep compiling.
+  ///
+  virtual AcquiredHardwareBuffer
+  ImageProducerTextureEntryAcquireLatestHardwareBuffer(
+      JavaLocalRef image_texture_entry) {
+    return AcquiredHardwareBuffer{};
+  }
 
   //----------------------------------------------------------------------------
   /// @brief      Grab the HardwareBuffer from image.

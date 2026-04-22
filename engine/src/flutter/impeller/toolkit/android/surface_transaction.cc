@@ -4,6 +4,8 @@
 
 #include "flutter/impeller/toolkit/android/surface_transaction.h"
 
+#include <android/data_space.h>
+
 #include "flutter/impeller/toolkit/android/hardware_buffer.h"
 #include "flutter/impeller/toolkit/android/surface_control.h"
 #include "impeller/base/validation.h"
@@ -77,6 +79,59 @@ bool SurfaceTransaction::SetContents(const SurfaceControl* control,
       buffer->GetHandle(),                                     //
       acquire_fence.is_valid() ? acquire_fence.release() : -1  //
   );
+
+  // For F16 buffers, set ExtendedSRGB dataspace so the compositor preserves
+  // values outside [0,1] (HDR/EDR headroom). This is the Android equivalent
+  // of iOS/macOS kCGColorSpaceExtendedSRGB.
+  static bool logged_once = false;
+  const bool is_f16 = buffer->GetDescriptor().format ==
+                       HardwareBufferFormat::kR16G16B16A16Float;
+  const bool ds_available =
+      GetProcTable().ASurfaceTransaction_setBufferDataSpace.IsAvailable();
+
+  if (is_f16 && ds_available) {
+    GetProcTable().ASurfaceTransaction_setBufferDataSpace(
+        transaction_.get().tx,  //
+        control->GetHandle(),   //
+        ADATASPACE_SCRGB        // gamma-encoded ExtendedSRGB
+    );
+  }
+
+  // Signal extended range brightness to the compositor (API 34+).
+  // Without this, ADATASPACE_SCRGB values >1.0 are NOT displayed brighter —
+  // the compositor defaults to desiredRatio=1.0 (SDR only).
+  //
+  // Declared range matches BT.2408's HLG peak-to-SDR-white ratio (10×).
+  // The app-side shaders (video_ycbcr.frag and photo_edit.frag) pre-tone-map
+  // their output to the actual display headroom via the BT.2390 EETF, so
+  // buffer contents stay within what the display can represent regardless
+  // of what we declare here. Declaring 10.0 ensures the compositor grants
+  // whatever headroom the display physically supports (it will clamp down
+  // to the panel's capability). This avoids relying on OEM compositor
+  // tone-mapping behaviour, which varies across devices.
+  const bool erb_available =
+      GetProcTable()
+          .ASurfaceTransaction_setExtendedRangeBrightness.IsAvailable();
+  if (is_f16 && erb_available) {
+    GetProcTable().ASurfaceTransaction_setExtendedRangeBrightness(
+        transaction_.get().tx,  //
+        control->GetHandle(),   //
+        10.0f,                  // currentBufferRatio: BT.2408 HLG peak / SDR
+        10.0f                   // desiredRatio: request full BT.2408 headroom
+    );
+  }
+
+  if (!logged_once) {
+    FML_LOG(INFO) << "SetContents: format="
+                  << (is_f16 ? "F16" : "RGBA8")
+                  << ", setBufferDataSpace available=" << ds_available
+                  << ", dataspace=" << (is_f16 ? "SCRGB" : "default")
+                  << ", setExtendedRangeBrightness available="
+                  << erb_available
+                  << ", extendedRange=10.0/10.0 (BT.2408 HLG peak)";
+    logged_once = true;
+  }
+
   return true;
 }
 

@@ -71,6 +71,17 @@ static bool ContainsFormat(const std::vector<vk::SurfaceFormatKHR>& formats,
 static std::optional<vk::SurfaceFormatKHR> ChooseSurfaceFormat(
     const std::vector<vk::SurfaceFormatKHR>& formats,
     PixelFormat preference) {
+  // Prefer F16 + ExtendedSRGB for HDR/EDR headroom (values >1.0 preserved).
+  // VK_EXT_swapchain_colorspace provides eExtendedSrgbNonlinearEXT.
+  const auto f16_hdr = vk::SurfaceFormatKHR{
+      vk::Format::eR16G16B16A16Sfloat,
+      vk::ColorSpaceKHR::eExtendedSrgbNonlinearEXT};
+  if (ContainsFormat(formats, f16_hdr)) {
+    FML_LOG(INFO) << "KHR swapchain: using F16 + ExtendedSRGB";
+    return f16_hdr;
+  }
+
+  // Fall back to standard sRGB formats.
   const auto colorspace = vk::ColorSpaceKHR::eSrgbNonlinear;
   const auto vk_preference =
       vk::SurfaceFormatKHR{ToVKImageFormat(preference), colorspace};
@@ -85,6 +96,13 @@ static std::optional<vk::SurfaceFormatKHR> ChooseSurfaceFormat(
     if (ContainsFormat(formats, format)) {
       return format;
     }
+  }
+
+  // Log available formats for debugging.
+  FML_LOG(IMPORTANT) << "No suitable Vulkan surface format found. Available:";
+  for (const auto& f : formats) {
+    FML_LOG(IMPORTANT) << "  format=" << vk::to_string(f.format)
+                       << " colorspace=" << vk::to_string(f.colorSpace);
   }
 
   return std::nullopt;
