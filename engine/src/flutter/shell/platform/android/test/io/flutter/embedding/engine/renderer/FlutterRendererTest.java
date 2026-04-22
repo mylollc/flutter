@@ -1051,4 +1051,270 @@ public class FlutterRendererTest {
     assertFalse(imageReaderProducer1.notifiedDestroy);
     assertFalse(imageReaderProducer2.notifiedDestroy);
   }
+
+  // ---- ImageTextureEntry direct-AHardwareBuffer path --------------------------
+  // Stored in the same ImageTextureRegistryEntry as the Image-based flow; the
+  // two are mutually exclusive per entry. These tests exercise push/acquire
+  // semantics without the native release hook (added in the follow-up commit
+  // that wires the consumer) — no real AHardwareBuffer is allocated, we pass
+  // sentinel pointer values since the Java side stores them opaquely.
+
+  private static final long FAKE_AHB_PTR = 0xCAFEBABE_00000001L;
+  private static final long FAKE_AHB_PTR_2 = 0xCAFEBABE_00000002L;
+
+  @Test
+  public void ImageTextureEntryHardwareBufferReturnsNullBeforeAnyPush() {
+    FlutterRenderer flutterRenderer = engineRule.getFlutterEngine().getRenderer();
+    TextureRegistry.ImageTextureEntry entry = flutterRenderer.createImageTexture();
+
+    TextureRegistry.ImageConsumer consumer = (TextureRegistry.ImageConsumer) entry;
+    assertNull(consumer.acquireLatestHardwareBuffer());
+
+    entry.release();
+  }
+
+  @Test
+  public void ImageTextureEntryHardwareBufferRoundTripsPointerAndFence() {
+    FlutterRenderer flutterRenderer = engineRule.getFlutterEngine().getRenderer();
+    TextureRegistry.ImageTextureEntry entry = flutterRenderer.createImageTexture();
+    TextureRegistry.ImageConsumer consumer = (TextureRegistry.ImageConsumer) entry;
+
+    entry.pushHardwareBuffer(FAKE_AHB_PTR, /* acquireFenceFd= */ 42);
+
+    TextureRegistry.HardwareBufferHandle handle = consumer.acquireLatestHardwareBuffer();
+    assertNotNull(handle);
+    assertEquals(FAKE_AHB_PTR, handle.ahbPtr);
+    assertEquals(42, handle.acquireFenceFd);
+
+    // Single-shot: a second acquire drains to null.
+    assertNull(consumer.acquireLatestHardwareBuffer());
+
+    entry.release();
+  }
+
+  @Test
+  public void ImageTextureEntryHardwareBufferMinusOneFenceMeansNoFence() {
+    FlutterRenderer flutterRenderer = engineRule.getFlutterEngine().getRenderer();
+    TextureRegistry.ImageTextureEntry entry = flutterRenderer.createImageTexture();
+    TextureRegistry.ImageConsumer consumer = (TextureRegistry.ImageConsumer) entry;
+
+    entry.pushHardwareBuffer(FAKE_AHB_PTR, /* acquireFenceFd= */ -1);
+
+    TextureRegistry.HardwareBufferHandle handle = consumer.acquireLatestHardwareBuffer();
+    assertNotNull(handle);
+    assertEquals(-1, handle.acquireFenceFd);
+
+    entry.release();
+  }
+
+  @Test
+  public void ImageTextureEntryHardwareBufferLatestPushWins() {
+    FlutterRenderer flutterRenderer = engineRule.getFlutterEngine().getRenderer();
+    TextureRegistry.ImageTextureEntry entry = flutterRenderer.createImageTexture();
+    TextureRegistry.ImageConsumer consumer = (TextureRegistry.ImageConsumer) entry;
+
+    entry.pushHardwareBuffer(FAKE_AHB_PTR, 7);
+    entry.pushHardwareBuffer(FAKE_AHB_PTR_2, 8);
+
+    TextureRegistry.HardwareBufferHandle handle = consumer.acquireLatestHardwareBuffer();
+    assertNotNull(handle);
+    assertEquals(FAKE_AHB_PTR_2, handle.ahbPtr);
+    assertEquals(8, handle.acquireFenceFd);
+
+    // The superseded AHB + fence fd went through the native release path.
+    verify(fakeFlutterJNI).releaseHardwareBuffer(FAKE_AHB_PTR, 7, -1);
+
+    entry.release();
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void ImageTextureEntryHardwareBufferRejectsZeroPointer() {
+    FlutterRenderer flutterRenderer = engineRule.getFlutterEngine().getRenderer();
+    TextureRegistry.ImageTextureEntry entry = flutterRenderer.createImageTexture();
+    try {
+      entry.pushHardwareBuffer(0L, /* acquireFenceFd= */ -1);
+    } finally {
+      entry.release();
+    }
+  }
+
+  @Test
+  public void ImageTextureEntryHardwareBufferReleaseClearsPendingState() {
+    FlutterRenderer flutterRenderer = engineRule.getFlutterEngine().getRenderer();
+    TextureRegistry.ImageTextureEntry entry = flutterRenderer.createImageTexture();
+    TextureRegistry.ImageConsumer consumer = (TextureRegistry.ImageConsumer) entry;
+
+    entry.pushHardwareBuffer(FAKE_AHB_PTR, 9);
+    entry.release();
+
+    // Post-release: pushes are no-ops, acquire returns null.
+    // (The documented contract of ImageTextureEntry treats post-release as
+    // silently inert — we mirror that for the AHardwareBuffer path.)
+    assertNull(consumer.acquireLatestHardwareBuffer());
+
+    // Native release was invoked on the pending AHB.
+    verify(fakeFlutterJNI).releaseHardwareBuffer(FAKE_AHB_PTR, 9, -1);
+  }
+
+  @Test
+  public void ImageTextureEntryPushHardwareBufferClearsPendingImage() {
+    FlutterRenderer flutterRenderer = engineRule.getFlutterEngine().getRenderer();
+    TextureRegistry.ImageTextureEntry entry = flutterRenderer.createImageTexture();
+    TextureRegistry.ImageConsumer consumer = (TextureRegistry.ImageConsumer) entry;
+
+    // Swap an Image-mode entry into AHardwareBuffer mode. The Image side
+    // must be closed (engine can't retain an Image once the producer moved
+    // to the direct path) and the AHardwareBuffer side must now be active.
+    Image fakeImage = mock(Image.class);
+    entry.pushImage(fakeImage);
+    entry.pushHardwareBuffer(FAKE_AHB_PTR, -1);
+
+    // AHardwareBuffer path active.
+    TextureRegistry.HardwareBufferHandle handle = consumer.acquireLatestHardwareBuffer();
+    assertNotNull(handle);
+    assertEquals(FAKE_AHB_PTR, handle.ahbPtr);
+    // The dropped Image was closed. (Verifies the Image was actively
+    // evicted, not merely ignored — covers the resource-leak case.)
+    verify(fakeImage).close();
+
+    entry.release();
+  }
+
+  @Test
+  public void ImageTextureEntryPushImageClearsPendingHardwareBuffer() {
+    FlutterRenderer flutterRenderer = engineRule.getFlutterEngine().getRenderer();
+    TextureRegistry.ImageTextureEntry entry = flutterRenderer.createImageTexture();
+    TextureRegistry.ImageConsumer consumer = (TextureRegistry.ImageConsumer) entry;
+
+    // Swap an AHardwareBuffer-mode entry into Image mode. The
+    // AHardwareBuffer side must be cleared. (We can't easily acquire the
+    // Image side here without stubbing SyncFence — mockito-core can't
+    // mock final Android API classes — so we verify the swap via the
+    // AHardwareBuffer side only.)
+    entry.pushHardwareBuffer(FAKE_AHB_PTR, 5);
+    Image fakeImage = mock(Image.class);
+    entry.pushImage(fakeImage);
+
+    assertNull(consumer.acquireLatestHardwareBuffer());
+
+    // The dropped AHB went through native release.
+    verify(fakeFlutterJNI).releaseHardwareBuffer(FAKE_AHB_PTR, 5, -1);
+
+    entry.release();
+  }
+
+  // ---- releaseAckFd (three-arg pushHardwareBuffer) ------------------------
+  // Producers that need to know when the engine has finished sampling an AHB
+  // (so they can reuse the underlying pool slot) supply an `eventfd` via the
+  // third arg to `pushHardwareBuffer`. The engine flows this fd through
+  // `HardwareBufferHandle` for the consumer to signal on its sampling
+  // completion, and — on every "the engine never sampled" supersession path
+  // — passes it to `FlutterJNI.releaseHardwareBuffer` so the native side
+  // signals+closes. These tests exercise each path without a real eventfd
+  // (the Java layer stores the fd opaquely).
+
+  private static final int FAKE_RELEASE_ACK_FD = 321;
+  private static final int FAKE_RELEASE_ACK_FD_2 = 654;
+
+  @Test
+  public void ImageTextureEntryHardwareBufferRoundTripsReleaseAckFd() {
+    FlutterRenderer flutterRenderer = engineRule.getFlutterEngine().getRenderer();
+    TextureRegistry.ImageTextureEntry entry = flutterRenderer.createImageTexture();
+    TextureRegistry.ImageConsumer consumer = (TextureRegistry.ImageConsumer) entry;
+
+    entry.pushHardwareBuffer(FAKE_AHB_PTR, /* acquireFenceFd= */ 42, FAKE_RELEASE_ACK_FD);
+
+    TextureRegistry.HardwareBufferHandle handle = consumer.acquireLatestHardwareBuffer();
+    assertNotNull(handle);
+    assertEquals(FAKE_AHB_PTR, handle.ahbPtr);
+    assertEquals(42, handle.acquireFenceFd);
+    assertEquals(FAKE_RELEASE_ACK_FD, handle.releaseAckFd);
+
+    entry.release();
+  }
+
+  @Test
+  public void ImageTextureEntryHardwareBufferTwoArgPushDefaultsReleaseAckToMinusOne() {
+    FlutterRenderer flutterRenderer = engineRule.getFlutterEngine().getRenderer();
+    TextureRegistry.ImageTextureEntry entry = flutterRenderer.createImageTexture();
+    TextureRegistry.ImageConsumer consumer = (TextureRegistry.ImageConsumer) entry;
+
+    // The default 2-arg overload must delegate to the 3-arg form with
+    // `releaseAckFd = -1`, preserving behaviour for producers that
+    // don't opt into the ack signaling.
+    entry.pushHardwareBuffer(FAKE_AHB_PTR, /* acquireFenceFd= */ -1);
+
+    TextureRegistry.HardwareBufferHandle handle = consumer.acquireLatestHardwareBuffer();
+    assertNotNull(handle);
+    assertEquals(-1, handle.releaseAckFd);
+
+    entry.release();
+  }
+
+  @Test
+  public void ImageTextureEntryHardwareBufferSupersededPushSignalsDroppedAck() {
+    FlutterRenderer flutterRenderer = engineRule.getFlutterEngine().getRenderer();
+    TextureRegistry.ImageTextureEntry entry = flutterRenderer.createImageTexture();
+    TextureRegistry.ImageConsumer consumer = (TextureRegistry.ImageConsumer) entry;
+
+    entry.pushHardwareBuffer(FAKE_AHB_PTR, 7, FAKE_RELEASE_ACK_FD);
+    entry.pushHardwareBuffer(FAKE_AHB_PTR_2, 8, FAKE_RELEASE_ACK_FD_2);
+
+    // Only the latest push is retrievable by the consumer.
+    TextureRegistry.HardwareBufferHandle handle = consumer.acquireLatestHardwareBuffer();
+    assertNotNull(handle);
+    assertEquals(FAKE_AHB_PTR_2, handle.ahbPtr);
+    assertEquals(FAKE_RELEASE_ACK_FD_2, handle.releaseAckFd);
+
+    // The dropped push's AHB + fence + releaseAckFd all flow to the
+    // native release path so the producer wakes up.
+    verify(fakeFlutterJNI).releaseHardwareBuffer(FAKE_AHB_PTR, 7, FAKE_RELEASE_ACK_FD);
+
+    entry.release();
+  }
+
+  @Test
+  public void ImageTextureEntryPushImageSignalsPendingReleaseAckFd() {
+    FlutterRenderer flutterRenderer = engineRule.getFlutterEngine().getRenderer();
+    TextureRegistry.ImageTextureEntry entry = flutterRenderer.createImageTexture();
+
+    // AHB-mode push carrying an ack fd, then swap to Image mode. The
+    // dropped AHB's releaseAckFd must flow through native release.
+    entry.pushHardwareBuffer(FAKE_AHB_PTR, 5, FAKE_RELEASE_ACK_FD);
+    Image fakeImage = mock(Image.class);
+    entry.pushImage(fakeImage);
+
+    verify(fakeFlutterJNI).releaseHardwareBuffer(FAKE_AHB_PTR, 5, FAKE_RELEASE_ACK_FD);
+
+    entry.release();
+  }
+
+  @Test
+  public void ImageTextureEntryReleaseSignalsPendingReleaseAckFd() {
+    FlutterRenderer flutterRenderer = engineRule.getFlutterEngine().getRenderer();
+    TextureRegistry.ImageTextureEntry entry = flutterRenderer.createImageTexture();
+
+    entry.pushHardwareBuffer(FAKE_AHB_PTR, 9, FAKE_RELEASE_ACK_FD);
+    entry.release();
+
+    // On release the pending AHB's full triple (ahb, fence, ack fd) is
+    // passed to native release so the producer's poll wakes up.
+    verify(fakeFlutterJNI).releaseHardwareBuffer(FAKE_AHB_PTR, 9, FAKE_RELEASE_ACK_FD);
+  }
+
+  @Test
+  public void ImageTextureEntryPushHardwareBufferAfterReleaseStillReleasesAhbAndAck() {
+    FlutterRenderer flutterRenderer = engineRule.getFlutterEngine().getRenderer();
+    TextureRegistry.ImageTextureEntry entry = flutterRenderer.createImageTexture();
+    entry.release();
+
+    // The producer races the entry destruction: the entry is gone but
+    // the producer has already transferred AHB ownership via push. We
+    // must still release the AHB (otherwise it leaks) AND signal the
+    // releaseAckFd (otherwise the producer blocks forever). Regression
+    // test for the released-branch leak fix.
+    entry.pushHardwareBuffer(FAKE_AHB_PTR, 11, FAKE_RELEASE_ACK_FD);
+
+    verify(fakeFlutterJNI).releaseHardwareBuffer(FAKE_AHB_PTR, 11, FAKE_RELEASE_ACK_FD);
+  }
 }

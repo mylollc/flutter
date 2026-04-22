@@ -31,9 +31,12 @@ class ContextVK;
 ///
 class AHBTextureSourceVK final : public TextureSourceVK {
  public:
+  /// `color_space` is a ColorSpace enum value declared by the buffer's
+  /// producer, or < 0 ("unspecified") to infer it from the pixel format.
   AHBTextureSourceVK(const std::shared_ptr<Context>& context,
                      struct AHardwareBuffer* hardware_buffer,
-                     const AHardwareBuffer_Desc& hardware_buffer_desc);
+                     const AHardwareBuffer_Desc& hardware_buffer_desc,
+                     int color_space = -1);
 
   AHBTextureSourceVK(const std::shared_ptr<Context>& context,
                      std::unique_ptr<android::HardwareBuffer> backing_store,

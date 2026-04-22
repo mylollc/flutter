@@ -155,6 +155,13 @@ CapabilitiesVK::GetEnabledInstanceExtensions() const {
     return std::nullopt;
   }
 
+  // Enable VK_EXT_swapchain_colorspace for HDR/EDR surface formats
+  // (eExtendedSrgbNonlinearEXT). This is an instance extension.
+  if (HasExtension("VK_EXT_swapchain_colorspace")) {
+    required.push_back("VK_EXT_swapchain_colorspace");
+    FML_LOG(INFO) << "Enabling VK_EXT_swapchain_colorspace";
+  }
+
   if (validations_enabled_) {
     if (!HasExtension("VK_EXT_debug_utils")) {
       VALIDATION_LOG << "Requested validations but could not find the "

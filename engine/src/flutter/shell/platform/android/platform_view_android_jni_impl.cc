@@ -4,7 +4,9 @@
 
 #include "flutter/shell/platform/android/platform_view_android_jni_impl.h"
 
+#include <android/hardware_buffer.h>
 #include <android/hardware_buffer_jni.h>
+#include <unistd.h>
 #include <android/native_window_jni.h>
 #include <dlfcn.h>
 #include <jni.h>
@@ -21,6 +23,7 @@
 #include "flutter/fml/platform/android/jni_weak_ref.h"
 #include "flutter/fml/platform/android/scoped_java_ref.h"
 #include "flutter/impeller/toolkit/android/proc_table.h"
+#include "flutter/impeller/toolkit/android/surface_transaction.h"
 #include "flutter/lib/ui/plugins/callback_cache.h"
 #include "flutter/shell/platform/android/android_shell_holder.h"
 #include "flutter/shell/platform/android/apk_asset_provider.h"
@@ -134,6 +137,17 @@ static jmethodID g_get_transform_matrix_method = nullptr;
 static jmethodID g_detach_from_gl_context_method = nullptr;
 
 static jmethodID g_acquire_latest_image_method = nullptr;
+
+// New in direct-AHB path. `acquireLatestHardwareBuffer()` returns a
+// `TextureRegistry.HardwareBufferHandle` Java object (or null) which wraps a
+// native `AHardwareBuffer*` and an acquire fence fd.
+static jmethodID g_acquire_latest_hardware_buffer_method = nullptr;
+static fml::jni::ScopedJavaGlobalRef<jclass>*
+    g_hardware_buffer_handle_class = nullptr;
+static jfieldID g_hardware_buffer_handle_ahb_ptr_field = nullptr;
+static jfieldID g_hardware_buffer_handle_acquire_fence_fd_field = nullptr;
+static jfieldID g_hardware_buffer_handle_release_ack_fd_field = nullptr;
+static jfieldID g_hardware_buffer_handle_color_space_field = nullptr;
 
 static jmethodID g_image_get_hardware_buffer_method = nullptr;
 
@@ -540,6 +554,13 @@ static jboolean GetIsSoftwareRendering(JNIEnv* env, jobject jcaller) {
   return FlutterMain::Get().GetSettings().enable_software_rendering;
 }
 
+// Declares the app's HDR/SDR headroom for the onscreen extended-range (F16)
+// surface; consumed by SurfaceTransaction::SetContents. Process-global (single
+// onscreen surface on Android), so it takes no shell-holder id.
+static void SetHdrHeadroom(JNIEnv* env, jobject jcaller, jdouble ratio) {
+  impeller::android::SetExtendedRangeBrightnessRatio(static_cast<float>(ratio));
+}
+
 static void RegisterTexture(JNIEnv* env,
                             jobject jcaller,
                             jlong shell_holder,
@@ -717,6 +738,57 @@ static void UpdateJavaAssetManager(JNIEnv* env,
       AssetResolver::AssetResolverType::kApkAssetProvider);
 }
 
+// Release an `AHardwareBuffer*` (previously pushed via
+// `ImageTextureEntry.pushHardwareBuffer`), close the associated acquire
+// fence fd, and signal+close the release-ack fd. Called from Java when the
+// producer swaps modes or releases the texture entry while an AHB was still
+// pending — the engine's Java-side can't invoke the NDK release directly.
+//
+// The release-ack fd is the producer's `eventfd` (or equivalent) that it
+// polls to know when the engine is done sampling the buffer. When we reach
+// this path the engine never sampled, so signaling the ack immediately is
+// correct — the producer's `poll(POLLIN)` wakes up and the buffer is safe
+// to overwrite. See `ImageTextureEntry.pushHardwareBuffer(long, int, int)`
+// for the full contract.
+//
+// Instance-method form (takes `jobject this`) rather than static so tests
+// can mock the `FlutterJNI` Java object to stub this call; `mockito-core`
+// without the inline mock maker can't stub static natives.
+static void ReleaseHardwareBuffer(JNIEnv* env,
+                                  jobject jcaller,
+                                  jlong ahbPtr,
+                                  jint acquireFenceFd,
+                                  jint releaseAckFd) {
+  if (acquireFenceFd >= 0) {
+    // The producer's GPU may still be in flight on this fence. We're on
+    // the supersession path: the engine never sampled the AHB, so the
+    // race window is zero; closing the acquire fd is correct and the
+    // producer's write is effectively discarded.
+    ::close(acquireFenceFd);
+  }
+  if (releaseAckFd >= 0) {
+    // Signal the producer's eventfd so any waiter wakes up. The write's
+    // value semantics are eventfd's: an 8-byte counter; writing `1`
+    // increments the counter by 1 and makes the fd POLLIN-ready. We
+    // ignore write errors — the producer may have already closed the
+    // fd if they gave up waiting. Always close on our side.
+    const uint64_t one = 1;
+    (void)::write(releaseAckFd, &one, sizeof(one));
+    ::close(releaseAckFd);
+  }
+  if (ahbPtr == 0) {
+    return;
+  }
+  const auto& release =
+      impeller::android::GetProcTable().AHardwareBuffer_release;
+  if (!release) {
+    FML_LOG(WARNING) << "AHardwareBuffer_release unavailable "
+                        "— dropped AHB will leak (pre-API-26 device)";
+    return;
+  }
+  release(reinterpret_cast<AHardwareBuffer*>(ahbPtr));
+}
+
 bool RegisterApi(JNIEnv* env) {
   static const JNINativeMethod flutter_jni_methods[] = {
       // Start of methods from FlutterJNI
@@ -834,6 +906,11 @@ bool RegisterApi(JNIEnv* env) {
           .fnPtr = reinterpret_cast<void*>(&GetIsSoftwareRendering),
       },
       {
+          .name = "nativeSetHdrHeadroom",
+          .signature = "(D)V",
+          .fnPtr = reinterpret_cast<void*>(&SetHdrHeadroom),
+      },
+      {
           .name = "nativeRegisterTexture",
           .signature = "(JJLjava/lang/ref/"
                        "WeakReference;)V",
@@ -921,6 +998,11 @@ bool RegisterApi(JNIEnv* env) {
           .name = "nativeIsSurfaceControlEnabled",
           .signature = "(J)Z",
           .fnPtr = reinterpret_cast<void*>(&IsSurfaceControlEnabled),
+      },
+      {
+          .name = "nativeReleaseHardwareBuffer",
+          .signature = "(JII)V",
+          .fnPtr = reinterpret_cast<void*>(&ReleaseHardwareBuffer),
       }};
 
   if (env->RegisterNatives(g_flutter_jni_class->obj(), flutter_jni_methods,
@@ -1175,6 +1257,56 @@ bool PlatformViewAndroid::Register(JNIEnv* env) {
   if (g_acquire_latest_image_method == nullptr) {
     FML_LOG(ERROR) << "Could not locate acquireLatestImage on "
                       "TextureRegistry.ImageConsumer class";
+    return false;
+  }
+
+  // `acquireLatestHardwareBuffer` is a default interface method added to
+  // `ImageConsumer` for the direct-AHB flow. Consumers that don't use the
+  // direct-AHB path (most of them) inherit the default `return null;`. Look
+  // up and fail loud if missing — signals a stale runtime vs. engine mismatch.
+  g_acquire_latest_hardware_buffer_method =
+      env->GetMethodID(g_image_consumer_texture_registry_interface->obj(),
+                       "acquireLatestHardwareBuffer",
+                       "()Lio/flutter/view/TextureRegistry$HardwareBufferHandle;");
+  if (g_acquire_latest_hardware_buffer_method == nullptr) {
+    FML_LOG(ERROR) << "Could not locate acquireLatestHardwareBuffer on "
+                      "TextureRegistry.ImageConsumer class";
+    return false;
+  }
+
+  g_hardware_buffer_handle_class = new fml::jni::ScopedJavaGlobalRef<jclass>(
+      env, env->FindClass("io/flutter/view/TextureRegistry$HardwareBufferHandle"));
+  if (g_hardware_buffer_handle_class->is_null()) {
+    FML_LOG(ERROR)
+        << "Could not locate TextureRegistry.HardwareBufferHandle class";
+    return false;
+  }
+  g_hardware_buffer_handle_ahb_ptr_field =
+      env->GetFieldID(g_hardware_buffer_handle_class->obj(), "ahbPtr", "J");
+  if (g_hardware_buffer_handle_ahb_ptr_field == nullptr) {
+    FML_LOG(ERROR)
+        << "Could not locate HardwareBufferHandle.ahbPtr field";
+    return false;
+  }
+  g_hardware_buffer_handle_acquire_fence_fd_field = env->GetFieldID(
+      g_hardware_buffer_handle_class->obj(), "acquireFenceFd", "I");
+  if (g_hardware_buffer_handle_acquire_fence_fd_field == nullptr) {
+    FML_LOG(ERROR)
+        << "Could not locate HardwareBufferHandle.acquireFenceFd field";
+    return false;
+  }
+  g_hardware_buffer_handle_release_ack_fd_field = env->GetFieldID(
+      g_hardware_buffer_handle_class->obj(), "releaseAckFd", "I");
+  if (g_hardware_buffer_handle_release_ack_fd_field == nullptr) {
+    FML_LOG(ERROR)
+        << "Could not locate HardwareBufferHandle.releaseAckFd field";
+    return false;
+  }
+
+  g_hardware_buffer_handle_color_space_field =
+      env->GetFieldID(g_hardware_buffer_handle_class->obj(), "colorSpace", "I");
+  if (g_hardware_buffer_handle_color_space_field == nullptr) {
+    FML_LOG(ERROR) << "Could not locate HardwareBufferHandle.colorSpace field";
     return false;
   }
 
@@ -1673,6 +1805,55 @@ PlatformViewAndroidJNIImpl::ImageProducerTextureEntryAcquireLatestImage(
   }
   // Return null.
   return JavaLocalRef();
+}
+
+AcquiredHardwareBuffer
+PlatformViewAndroidJNIImpl::ImageProducerTextureEntryAcquireLatestHardwareBuffer(
+    JavaLocalRef image_producer_texture_entry) {
+  JNIEnv* env = fml::jni::AttachCurrentThread();
+
+  if (image_producer_texture_entry.is_null()) {
+    return AcquiredHardwareBuffer{};
+  }
+
+  fml::jni::ScopedJavaLocalRef<jobject> image_producer_texture_entry_local_ref(
+      env, env->CallObjectMethod(image_producer_texture_entry.obj(),
+                                 g_java_weak_reference_get_method));
+  if (image_producer_texture_entry_local_ref.is_null()) {
+    return AcquiredHardwareBuffer{};
+  }
+
+  fml::jni::ScopedJavaLocalRef<jobject> handle(
+      env, env->CallObjectMethod(image_producer_texture_entry_local_ref.obj(),
+                                 g_acquire_latest_hardware_buffer_method));
+  // `CheckException` returns `true` when no exception was pending — the
+  // common case. When it returns `false` it has already cleared + logged
+  // the exception, so we just need to skip the unpack. Either way, a
+  // null `handle` (no pending AHB, or exception scenario) lands on the
+  // empty-handle return below.
+  if (!fml::jni::CheckException(env) || handle.is_null()) {
+    return AcquiredHardwareBuffer{};
+  }
+
+  AcquiredHardwareBuffer out;
+  jlong ahb_as_long = env->GetLongField(
+      handle.obj(), g_hardware_buffer_handle_ahb_ptr_field);
+  out.acquire_fence_fd = env->GetIntField(
+      handle.obj(), g_hardware_buffer_handle_acquire_fence_fd_field);
+  out.release_ack_fd = env->GetIntField(
+      handle.obj(), g_hardware_buffer_handle_release_ack_fd_field);
+  out.color_space = env->GetIntField(
+      handle.obj(), g_hardware_buffer_handle_color_space_field);
+  // The Java side guarantees ahbPtr is non-zero when HardwareBufferHandle is
+  // non-null (IllegalArgumentException otherwise), so any zero seen here is a
+  // contract break — treat as no-op rather than crashing.
+  if (ahb_as_long == 0) {
+    FML_LOG(WARNING)
+        << "HardwareBufferHandle returned with ahbPtr==0; treating as empty";
+    return AcquiredHardwareBuffer{};
+  }
+  out.buffer = reinterpret_cast<AHardwareBuffer*>(ahb_as_long);
+  return out;
 }
 
 JavaLocalRef PlatformViewAndroidJNIImpl::ImageGetHardwareBuffer(

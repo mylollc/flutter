@@ -18,6 +18,14 @@ namespace impeller::android {
 class SurfaceControl;
 class HardwareBuffer;
 
+/// Declares the app's HDR/SDR headroom for the onscreen extended-range (F16)
+/// surface. SetContents passes it to
+/// `ASurfaceTransaction_setExtendedRangeBrightness` so the compositor maps the
+/// buffer's [1.0, ratio] range onto the panel's headroom. Values < 1.0 are
+/// clamped to 1.0 (SDR). Thread-safe; defaults to 1.0 until set.
+void SetExtendedRangeBrightnessRatio(float ratio);
+float GetExtendedRangeBrightnessRatio();
+
 /// @brief A wrapper class that indicates whether a SurfaceTransaction was
 /// created by the flutter engine or was borrowed from Java for platform
 /// interop.
