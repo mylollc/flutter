@@ -13,6 +13,8 @@ static AHardwareBuffer_Format ToAHardwareBufferFormat(
   switch (format) {
     case HardwareBufferFormat::kR8G8B8A8UNormInt:
       return AHARDWAREBUFFER_FORMAT_R8G8B8A8_UNORM;
+    case HardwareBufferFormat::kR16G16B16A16Float:
+      return AHARDWAREBUFFER_FORMAT_R16G16B16A16_FLOAT;
   }
   FML_UNREACHABLE();
 }
@@ -87,12 +89,22 @@ AHardwareBuffer* HardwareBuffer::GetHandle() const {
 HardwareBufferDescriptor HardwareBufferDescriptor::MakeForSwapchainImage(
     const ISize& size) {
   HardwareBufferDescriptor desc;
-  desc.format = HardwareBufferFormat::kR8G8B8A8UNormInt;
   // Zero sized hardware buffers cannot be allocated.
   desc.size = size.Max(ISize{1u, 1u});
   desc.usage = HardwareBufferUsageFlags::kFrameBufferAttachment |
                HardwareBufferUsageFlags::kCompositorOverlay |
                HardwareBufferUsageFlags::kSampledImage;
+
+  // Prefer F16 for HDR/EDR headroom (values >1.0 for extended dynamic range).
+  // Falls back to RGBA8 on devices that don't support F16 for swapchain usage.
+  desc.format = HardwareBufferFormat::kR16G16B16A16Float;
+  if (!desc.IsAllocatable()) {
+    FML_LOG(WARNING) << "F16 hardware buffers not supported for "
+                        "swapchain; falling back to RGBA8.";
+    desc.format = HardwareBufferFormat::kR8G8B8A8UNormInt;
+  } else {
+    FML_LOG(INFO) << "Swapchain using F16 (RGBA16Float) format.";
+  }
   return desc;
 }
 

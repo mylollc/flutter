@@ -23,9 +23,18 @@ enum class HardwareBufferFormat {
   /// @see        Vulkan Format: VK_FORMAT_R8G8B8A8_UNORM
   /// @see        OpenGL ES Format: GL_RGBA8
   ///
-  /// Why have many format when one format do trick?
-  ///
   kR8G8B8A8UNormInt,
+
+  //----------------------------------------------------------------------------
+  /// 16-bit float per channel. Required for HDR/EDR content — values outside
+  /// [0, 1] represent extended dynamic range. Available on API 26+ but
+  /// allocation may fail on devices without F16 framebuffer support (checked
+  /// via AHardwareBuffer_isSupported at runtime).
+  ///
+  /// @see        Vulkan Format: VK_FORMAT_R16G16B16A16_SFLOAT
+  /// @see        OpenGL ES Format: GL_RGBA16F
+  ///
+  kR16G16B16A16Float,
 };
 
 enum class HardwareBufferUsageFlags {

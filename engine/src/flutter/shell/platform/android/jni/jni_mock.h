@@ -78,6 +78,11 @@ class JNIMock final : public PlatformViewAndroidJNI {
               (JavaLocalRef image_texture_entry),
               (override));
 
+  MOCK_METHOD(AcquiredHardwareBuffer,
+              ImageProducerTextureEntryAcquireLatestHardwareBuffer,
+              (JavaLocalRef image_texture_entry),
+              (override));
+
   MOCK_METHOD(JavaLocalRef,
               ImageGetHardwareBuffer,
               (JavaLocalRef image),

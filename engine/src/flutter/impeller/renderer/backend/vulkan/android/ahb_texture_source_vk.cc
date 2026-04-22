@@ -284,7 +284,8 @@ TextureType ToTextureType(const AHardwareBuffer_Desc& ahb_desc) {
   return TextureType::kTexture2D;
 }
 
-TextureDescriptor ToTextureDescriptor(const AHardwareBuffer_Desc& ahb_desc) {
+TextureDescriptor ToTextureDescriptor(const AHardwareBuffer_Desc& ahb_desc,
+                                      int color_space) {
   const auto ahb_size = ISize{ahb_desc.width, ahb_desc.height};
   TextureDescriptor desc;
   // We are not going to touch hardware buffers on the CPU or use them as
@@ -302,6 +303,23 @@ TextureDescriptor ToTextureDescriptor(const AHardwareBuffer_Desc& ahb_desc) {
   if (ahb_desc.usage & AHARDWAREBUFFER_USAGE_GPU_FRAMEBUFFER) {
     desc.usage = TextureUsage::kRenderTarget;
   }
+  // Color space. Prefer the producer-declared value, threaded from
+  // ImageTextureEntry.pushHardwareBuffer(..., colorSpace) through the JNI
+  // HardwareBufferHandle. `color_space` is a ColorSpace enum value, or < 0
+  // ("unspecified") to infer from the pixel format. The composite step
+  // (TextureContents) reads color_space when a texture is sampled as a source
+  // to apply the gamut matrix + transfer; render-target attachments (e.g. the
+  // onscreen swapchain image) never consult it.
+  //
+  // Inference fallback: an F16 external texture with no declared color space is
+  // treated as linear Display P3 (the wide-gamut/HDR convention, mirroring
+  // iOS's wrapRGBA16FloatTexture). Producers that need a different space pass
+  // it explicitly via the colorSpace parameter.
+  if (color_space >= 0) {
+    desc.color_space = static_cast<ColorSpace>(color_space);
+  } else if (desc.format == PixelFormat::kR16G16B16A16Float) {
+    desc.color_space = ColorSpace::kLinearDisplayP3;
+  }
   return desc;
 }
 }  // namespace
@@ -309,8 +327,9 @@ TextureDescriptor ToTextureDescriptor(const AHardwareBuffer_Desc& ahb_desc) {
 AHBTextureSourceVK::AHBTextureSourceVK(
     const std::shared_ptr<Context>& p_context,
     struct AHardwareBuffer* ahb,
-    const AHardwareBuffer_Desc& ahb_desc)
-    : TextureSourceVK(ToTextureDescriptor(ahb_desc)) {
+    const AHardwareBuffer_Desc& ahb_desc,
+    int color_space)
+    : TextureSourceVK(ToTextureDescriptor(ahb_desc, color_space)) {
   if (!p_context) {
     return;
   }

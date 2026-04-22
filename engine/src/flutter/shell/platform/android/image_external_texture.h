@@ -68,6 +68,17 @@ class ImageExternalTexture : public flutter::Texture {
 
   JavaLocalRef AcquireLatestImage();
 
+  /// Direct-AHB intake. Returns an `AcquiredHardwareBuffer` whose `buffer` is
+  /// nullptr when the producer is on the legacy `Image` flow (or when no
+  /// frame has been pushed yet). When non-null, the consumer owns one
+  /// `AHardwareBuffer_acquire` reference + the fence fd, per the contract
+  /// on `AcquiredHardwareBuffer`.
+  AcquiredHardwareBuffer AcquireLatestHardwareBuffer();
+
+  /// Drop our one AHB reference (and close the acquire fence fd, if any).
+  /// Safe to call with `handle.buffer == nullptr` as a no-op.
+  void ReleaseAcquiredHardwareBuffer(const AcquiredHardwareBuffer& handle);
+
   void CloseImage(const fml::jni::JavaRef<jobject>& image);
 
   JavaLocalRef HardwareBufferFor(const fml::jni::JavaRef<jobject>& image);

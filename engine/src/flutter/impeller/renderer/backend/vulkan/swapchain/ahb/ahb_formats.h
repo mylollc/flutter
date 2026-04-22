@@ -14,6 +14,8 @@ constexpr PixelFormat ToPixelFormat(android::HardwareBufferFormat format) {
   switch (format) {
     case android::HardwareBufferFormat::kR8G8B8A8UNormInt:
       return PixelFormat::kR8G8B8A8UNormInt;
+    case android::HardwareBufferFormat::kR16G16B16A16Float:
+      return PixelFormat::kR16G16B16A16Float;
   }
   FML_UNREACHABLE();
 }
