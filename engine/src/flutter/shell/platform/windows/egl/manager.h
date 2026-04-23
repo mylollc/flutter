@@ -80,6 +80,12 @@ class Manager {
   // Get the EGL context used for async texture uploads.
   virtual Context* resource_context() const;
 
+  // True when ANGLE supplied an RGBA16 float-component config; composed
+  // Flutter surfaces should render into F16 backing stores so HDR highlights
+  // survive compositing. Callers must mirror this into the GL format they
+  // request for backing-store textures.
+  virtual bool is_rgba16float() const { return is_rgba16float_; }
+
   static std::optional<LUID> GetLowPowerGpuLuid();
 
   static std::optional<LUID> GetHighPerformanceGpuLuid();
@@ -119,6 +125,9 @@ class Manager {
 
   // EGL framebuffer configuration.
   EGLConfig config_ = nullptr;
+
+  // True when |config_| is an RGBA16 float-component config.
+  bool is_rgba16float_ = false;
 
   // The EGL context used to render Flutter views.
   std::unique_ptr<Context> render_context_;

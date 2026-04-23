@@ -110,16 +110,24 @@ sk_sp<DlImage> EmbedderExternalTextureGL::ResolveTextureSkia(
   auto gr_backend_texture = GrBackendTextures::MakeGL(
       width, height, skgpu::Mipmapped::kNo, gr_texture_info);
   SkImages::TextureReleaseProc release_proc = texture->destruction_callback;
-  const SkColorType color_type = (texture->format == GL_RGBA16F_EXT)
-                                     ? kRGBA_F16_SkColorType
-                                     : kRGBA_8888_SkColorType;
+  const bool is_f16 = (texture->format == GL_RGBA16F_EXT);
+  const SkColorType color_type =
+      is_f16 ? kRGBA_F16_SkColorType : kRGBA_8888_SkColorType;
+  // F16 external textures carry linear scRGB pixel values (HDR content
+  // pre-linearized by the embedder). Tagging them with MakeSRGBLinear() tells
+  // Skia the values are already in the destination's linear color space so
+  // compositing into an F16 linear-scRGB surface preserves >1.0 highlights
+  // instead of running an sRGB->linear conversion that clamps them. 8-bit
+  // textures pass nullptr (implicit sRGB), preserving prior behavior.
+  sk_sp<SkColorSpace> color_space =
+      is_f16 ? SkColorSpace::MakeSRGBLinear() : nullptr;
   auto image =
       SkImages::BorrowTextureFrom(context,                   // context
                                   gr_backend_texture,        // texture handle
                                   kTopLeft_GrSurfaceOrigin,  // origin
                                   color_type,                // color type
                                   kPremul_SkAlphaType,       // alpha type
-                                  nullptr,                   // colorspace
+                                  color_space,               // colorspace
                                   release_proc,       // texture release proc
                                   texture->user_data  // texture release context
       );

@@ -185,17 +185,44 @@ bool Manager::InitializeDisplay(GpuPreference gpu_preference) {
 }
 
 bool Manager::InitializeConfig() {
-  const EGLint config_attributes[] = {EGL_RED_SIZE,   8, EGL_GREEN_SIZE,   8,
-                                      EGL_BLUE_SIZE,  8, EGL_ALPHA_SIZE,   8,
-                                      EGL_DEPTH_SIZE, 8, EGL_STENCIL_SIZE, 8,
-                                      EGL_NONE};
+  // Prefer an RGBA16 float-component config so HDR content can be composited
+  // with values >1.0 preserved. The paired surface colorspace attribute in
+  // CreateWindowSurface completes the HDR presentation chain. Falls back to
+  // the legacy RGBA8 config on systems where ANGLE can't supply F16 (e.g.
+  // older drivers, WARP software fallback, D3D11 Feature Level 9_3).
+  const EGLint f16_config_attributes[] = {
+      EGL_COLOR_COMPONENT_TYPE_EXT, EGL_COLOR_COMPONENT_TYPE_FLOAT_EXT,
+      EGL_RED_SIZE,                 16,
+      EGL_GREEN_SIZE,               16,
+      EGL_BLUE_SIZE,                16,
+      EGL_ALPHA_SIZE,               16,
+      EGL_DEPTH_SIZE,               8,
+      EGL_STENCIL_SIZE,             8,
+      EGL_NONE};
+
+  const EGLint rgba8_config_attributes[] = {
+      EGL_RED_SIZE,   8, EGL_GREEN_SIZE,   8, EGL_BLUE_SIZE,  8,
+      EGL_ALPHA_SIZE, 8, EGL_DEPTH_SIZE,   8, EGL_STENCIL_SIZE, 8,
+      EGL_NONE};
 
   EGLint num_config = 0;
 
-  EGLBoolean result =
-      ::eglChooseConfig(display_, config_attributes, &config_, 1, &num_config);
+  const char* extensions = ::eglQueryString(display_, EGL_EXTENSIONS);
+  FML_LOG(INFO) << "[HDR] EGL extensions: "
+                << (extensions ? extensions : "<null>");
 
-  if (result == EGL_TRUE && num_config > 0) {
+  if (::eglChooseConfig(display_, f16_config_attributes, &config_, 1,
+                        &num_config) == EGL_TRUE &&
+      num_config > 0) {
+    is_rgba16float_ = true;
+    FML_LOG(INFO) << "[HDR] Chose RGBA16F EGL config (HDR-capable).";
+    return true;
+  }
+
+  FML_LOG(INFO) << "[HDR] RGBA16F config unavailable, falling back to RGBA8.";
+  if (::eglChooseConfig(display_, rgba8_config_attributes, &config_, 1,
+                        &num_config) == EGL_TRUE &&
+      num_config > 0) {
     return true;
   }
 
@@ -290,17 +317,53 @@ std::unique_ptr<WindowSurface> Manager::CreateWindowSurface(HWND hwnd,
   // Disable ANGLE's automatic surface resizing and provide an explicit size.
   // The surface will need to be destroyed and re-created if the HWND is
   // resized.
-  const EGLint surface_attributes[] = {EGL_FIXED_SIZE_ANGLE,
-                                       EGL_TRUE,
-                                       EGL_WIDTH,
-                                       static_cast<EGLint>(width),
-                                       EGL_HEIGHT,
-                                       static_cast<EGLint>(height),
-                                       EGL_NONE};
+  //
+  // For F16 configs, request a linear-scRGB colorspace surface. ANGLE's
+  // D3D11 backend currently tags F16 flip-model swap chains as
+  // DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709 (linear scRGB) by default, and
+  // the Skia color-managed compositor on F16 writes linear values — the
+  // attribute makes that intent explicit so a future ANGLE version that
+  // gains this extension tags the chain identically instead of defaulting
+  // to a gamma-encoded variant that would mismatch Skia's output.
+  std::vector<EGLint> surface_attributes = {
+      EGL_FIXED_SIZE_ANGLE, EGL_TRUE,
+      EGL_WIDTH,            static_cast<EGLint>(width),
+      EGL_HEIGHT,           static_cast<EGLint>(height),
+  };
+  if (is_rgba16float_) {
+    surface_attributes.push_back(EGL_GL_COLORSPACE);
+    surface_attributes.push_back(EGL_GL_COLORSPACE_SCRGB_LINEAR_EXT);
+  }
+  surface_attributes.push_back(EGL_NONE);
 
-  auto const surface = ::eglCreateWindowSurface(
+  EGLSurface surface = ::eglCreateWindowSurface(
       display_, config_, static_cast<EGLNativeWindowType>(hwnd),
-      surface_attributes);
+      surface_attributes.data());
+
+  if (is_rgba16float_) {
+    if (surface != EGL_NO_SURFACE) {
+      FML_LOG(INFO)
+          << "[HDR] Window surface created with linear-scRGB colorspace.";
+    } else {
+      EGLint err = ::eglGetError();
+      FML_LOG(INFO) << "[HDR] linear-scRGB colorspace rejected (eglError=0x"
+                    << std::hex << err << std::dec
+                    << "); retrying without colorspace attribute.";
+      const EGLint fallback_attributes[] = {
+          EGL_FIXED_SIZE_ANGLE, EGL_TRUE,
+          EGL_WIDTH,            static_cast<EGLint>(width),
+          EGL_HEIGHT,           static_cast<EGLint>(height),
+          EGL_NONE};
+      surface = ::eglCreateWindowSurface(
+          display_, config_, static_cast<EGLNativeWindowType>(hwnd),
+          fallback_attributes);
+      if (surface != EGL_NO_SURFACE) {
+        FML_LOG(INFO) << "[HDR] Window surface created without colorspace tag "
+                         "(F16 only).";
+      }
+    }
+  }
+
   if (surface == EGL_NO_SURFACE) {
     LogEGLError("Surface creation failed.");
     return nullptr;
