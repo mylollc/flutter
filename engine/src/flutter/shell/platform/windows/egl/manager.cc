@@ -318,13 +318,19 @@ std::unique_ptr<WindowSurface> Manager::CreateWindowSurface(HWND hwnd,
   // The surface will need to be destroyed and re-created if the HWND is
   // resized.
   //
-  // For F16 configs, request a linear-scRGB colorspace surface. ANGLE's
-  // D3D11 backend currently tags F16 flip-model swap chains as
-  // DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709 (linear scRGB) by default, and
-  // the Skia color-managed compositor on F16 writes linear values — the
-  // attribute makes that intent explicit so a future ANGLE version that
-  // gains this extension tags the chain identically instead of defaulting
-  // to a gamma-encoded variant that would mismatch Skia's output.
+  // For F16 configs, request two extra attributes so HDR presentation
+  // actually reaches the display:
+  //   1. EGL_GL_COLORSPACE_SCRGB_LINEAR_EXT — ANGLE's D3D11 backend
+  //      translates this into IDXGISwapChain3::SetColorSpace1 with
+  //      DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709 on the underlying swap
+  //      chain. Without the explicit call Windows treats the swap chain
+  //      as SDR regardless of the FP16 format.
+  //   2. EGL_DIRECT_COMPOSITION_ANGLE = EGL_TRUE — required because
+  //      SetColorSpace1 only applies to flip-model swap chains. ANGLE's
+  //      default Win32 path (CreateSwapChainForHwnd) creates a BitBlt-
+  //      model chain (SwapEffect SEQUENTIAL), which silently rejects
+  //      SetColorSpace1. DirectComposition routes through
+  //      CreateSwapChainForComposition which uses FLIP_SEQUENTIAL.
   std::vector<EGLint> surface_attributes = {
       EGL_FIXED_SIZE_ANGLE, EGL_TRUE,
       EGL_WIDTH,            static_cast<EGLint>(width),
@@ -333,6 +339,8 @@ std::unique_ptr<WindowSurface> Manager::CreateWindowSurface(HWND hwnd,
   if (is_rgba16float_) {
     surface_attributes.push_back(EGL_GL_COLORSPACE);
     surface_attributes.push_back(EGL_GL_COLORSPACE_SCRGB_LINEAR_EXT);
+    surface_attributes.push_back(EGL_DIRECT_COMPOSITION_ANGLE);
+    surface_attributes.push_back(EGL_TRUE);
   }
   surface_attributes.push_back(EGL_NONE);
 
@@ -342,13 +350,13 @@ std::unique_ptr<WindowSurface> Manager::CreateWindowSurface(HWND hwnd,
 
   if (is_rgba16float_) {
     if (surface != EGL_NO_SURFACE) {
-      FML_LOG(INFO)
-          << "[HDR] Window surface created with linear-scRGB colorspace.";
+      FML_LOG(INFO) << "[HDR] Window surface created with linear-scRGB "
+                       "colorspace + DirectComposition.";
     } else {
       EGLint err = ::eglGetError();
-      FML_LOG(INFO) << "[HDR] linear-scRGB colorspace rejected (eglError=0x"
+      FML_LOG(INFO) << "[HDR] HDR surface creation failed (eglError=0x"
                     << std::hex << err << std::dec
-                    << "); retrying without colorspace attribute.";
+                    << "); retrying without HDR attributes.";
       const EGLint fallback_attributes[] = {
           EGL_FIXED_SIZE_ANGLE, EGL_TRUE,
           EGL_WIDTH,            static_cast<EGLint>(width),
@@ -358,8 +366,8 @@ std::unique_ptr<WindowSurface> Manager::CreateWindowSurface(HWND hwnd,
           display_, config_, static_cast<EGLNativeWindowType>(hwnd),
           fallback_attributes);
       if (surface != EGL_NO_SURFACE) {
-        FML_LOG(INFO) << "[HDR] Window surface created without colorspace tag "
-                         "(F16 only).";
+        FML_LOG(INFO) << "[HDR] Window surface created without HDR attributes "
+                         "(F16 only, SDR presentation).";
       }
     }
   }
