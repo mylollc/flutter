@@ -64,9 +64,19 @@ class Manager {
   bool HasContextCurrent();
 
   // Creates a |EGLSurface| from the provided handle.
+  //
+  // |is_rgba16float| selects the EGL config used for the pbuffer:
+  //   * true  → the RGBA16F config (matches HDR/FP16 shared handles)
+  //   * false → the RGBA8 config (matches 8-bit BGRA shared handles,
+  //             including media_kit's video output)
+  //
+  // Without this distinction ANGLE rejects pbuffer creation with
+  // EGL_BAD_PARAMETER when the buffer format doesn't match the config,
+  // which broke media_kit video after the FP16 config landed.
   EGLSurface CreateSurfaceFromHandle(EGLenum handle_type,
                                      EGLClientBuffer handle,
-                                     const EGLint* attributes) const;
+                                     const EGLint* attributes,
+                                     bool is_rgba16float = false) const;
 
   // Gets the |EGLDisplay|.
   EGLDisplay egl_display() const { return display_; };
@@ -123,8 +133,18 @@ class Manager {
   // EGL representation of native display.
   EGLDisplay display_ = EGL_NO_DISPLAY;
 
-  // EGL framebuffer configuration.
+  // EGL framebuffer configuration used for the main Flutter render
+  // context (F16 when available, else RGBA8 — same config as
+  // |config_rgba8_| in that case).
   EGLConfig config_ = nullptr;
+
+  // RGBA8 EGL framebuffer configuration used for 8-bit shared-handle
+  // pbuffer creation (e.g., media_kit's BGRA8 video output textures).
+  // Always populated on success, independent of whether F16 is
+  // available. ANGLE's |eglCreatePbufferFromClientBuffer| rejects the
+  // call when the buffer format doesn't match the config, so 8-bit
+  // external textures must bind against an 8-bit config.
+  EGLConfig config_rgba8_ = nullptr;
 
   // True when |config_| is an RGBA16 float-component config.
   bool is_rgba16float_ = false;

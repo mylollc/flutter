@@ -149,7 +149,7 @@ bool ExternalTextureD3d::CreateOrUpdateTexture(
     egl_surface_ = egl_manager_->CreateSurfaceFromHandle(
         use_direct_pointer ? EGL_D3D_TEXTURE_ANGLE
                            : EGL_D3D_TEXTURE_2D_SHARE_HANDLE_ANGLE,
-        buffer, attributes);
+        buffer, attributes, is_rgba16float_);
 
     if (egl_surface_ == EGL_NO_SURFACE) {
       EGLint err = eglGetError();

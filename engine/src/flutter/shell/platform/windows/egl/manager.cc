@@ -211,6 +211,18 @@ bool Manager::InitializeConfig() {
   FML_LOG(INFO) << "[HDR] EGL extensions: "
                 << (extensions ? extensions : "<null>");
 
+  // Always pick an RGBA8 config as well — needed by
+  // |CreateSurfaceFromHandle| when external textures hand us 8-bit
+  // shared handles (e.g. media_kit's BGRA8 video output). Without a
+  // matching 8-bit config, ANGLE rejects pbuffer creation with
+  // EGL_BAD_PARAMETER even if |config_| is F16.
+  if (::eglChooseConfig(display_, rgba8_config_attributes, &config_rgba8_, 1,
+                        &num_config) != EGL_TRUE ||
+      num_config == 0) {
+    LogEGLError("Failed to choose RGBA8 EGL config");
+    return false;
+  }
+
   if (::eglChooseConfig(display_, f16_config_attributes, &config_, 1,
                         &num_config) == EGL_TRUE &&
       num_config > 0) {
@@ -220,14 +232,10 @@ bool Manager::InitializeConfig() {
   }
 
   FML_LOG(INFO) << "[HDR] RGBA16F config unavailable, falling back to RGBA8.";
-  if (::eglChooseConfig(display_, rgba8_config_attributes, &config_, 1,
-                        &num_config) == EGL_TRUE &&
-      num_config > 0) {
-    return true;
-  }
-
-  LogEGLError("Failed to choose EGL config");
-  return false;
+  // F16 unavailable — use the same RGBA8 config for both the main
+  // render context and 8-bit external textures.
+  config_ = config_rgba8_;
+  return true;
 }
 
 bool Manager::InitializeContexts() {
@@ -387,9 +395,14 @@ bool Manager::HasContextCurrent() {
 
 EGLSurface Manager::CreateSurfaceFromHandle(EGLenum handle_type,
                                             EGLClientBuffer handle,
-                                            const EGLint* attributes) const {
+                                            const EGLint* attributes,
+                                            bool is_rgba16float) const {
+  // Pick the config whose pixel format matches the incoming client
+  // buffer. Passing an F16 config for an 8-bit shared handle (or vice
+  // versa) makes ANGLE reject the pbuffer with EGL_BAD_PARAMETER.
+  EGLConfig config = is_rgba16float ? config_ : config_rgba8_;
   return ::eglCreatePbufferFromClientBuffer(display_, handle_type, handle,
-                                            config_, attributes);
+                                            config, attributes);
 }
 
 bool Manager::GetDevice(ID3D11Device** device) {
