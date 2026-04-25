@@ -64,21 +64,40 @@ class Manager {
   bool HasContextCurrent();
 
   // Creates a |EGLSurface| from the provided handle.
-  EGLSurface CreateSurfaceFromHandle(EGLenum handle_type,
-                                     EGLClientBuffer handle,
-                                     const EGLint* attributes) const;
+  //
+  // |is_rgba16float| selects the EGL config used for the pbuffer:
+  //   * true  → the RGBA16F config (matches HDR/FP16 shared handles)
+  //   * false → the RGBA8 config (matches 8-bit BGRA shared handles,
+  //             including media_kit's video output)
+  //
+  // Without this distinction ANGLE rejects pbuffer creation with
+  // EGL_BAD_PARAMETER when the buffer format doesn't match the config,
+  // which broke media_kit video after the FP16 config landed.
+  // Virtual so unit tests can mock the handle-import path without linking
+  // ANGLE — exercised by ExternalTextureD3dTest.
+  virtual EGLSurface CreateSurfaceFromHandle(EGLenum handle_type,
+                                             EGLClientBuffer handle,
+                                             const EGLint* attributes,
+                                             bool is_rgba16float = false) const;
 
   // Gets the |EGLDisplay|.
-  EGLDisplay egl_display() const { return display_; };
+  virtual EGLDisplay egl_display() const { return display_; };
 
-  // Gets the |ID3D11Device| chosen by ANGLE.
-  bool GetDevice(ID3D11Device** device);
+  // Gets the |ID3D11Device| chosen by ANGLE. Virtual for the same reason
+  // as CreateSurfaceFromHandle above.
+  virtual bool GetDevice(ID3D11Device** device);
 
   // Get the EGL context used to render Flutter views.
   virtual Context* render_context() const;
 
   // Get the EGL context used for async texture uploads.
   virtual Context* resource_context() const;
+
+  // True when ANGLE supplied an RGBA16 float-component config; composed
+  // Flutter surfaces should render into F16 backing stores so HDR highlights
+  // survive compositing. Callers must mirror this into the GL format they
+  // request for backing-store textures.
+  virtual bool is_rgba16float() const { return is_rgba16float_; }
 
   static std::optional<LUID> GetLowPowerGpuLuid();
 
@@ -117,8 +136,21 @@ class Manager {
   // EGL representation of native display.
   EGLDisplay display_ = EGL_NO_DISPLAY;
 
-  // EGL framebuffer configuration.
+  // EGL framebuffer configuration used for the main Flutter render
+  // context (F16 when available, else RGBA8 — same config as
+  // |config_rgba8_| in that case).
   EGLConfig config_ = nullptr;
+
+  // RGBA8 EGL framebuffer configuration used for 8-bit shared-handle
+  // pbuffer creation (e.g., media_kit's BGRA8 video output textures).
+  // Always populated on success, independent of whether F16 is
+  // available. ANGLE's |eglCreatePbufferFromClientBuffer| rejects the
+  // call when the buffer format doesn't match the config, so 8-bit
+  // external textures must bind against an 8-bit config.
+  EGLConfig config_rgba8_ = nullptr;
+
+  // True when |config_| is an RGBA16 float-component config.
+  bool is_rgba16float_ = false;
 
   // The EGL context used to render Flutter views.
   std::unique_ptr<Context> render_context_;
