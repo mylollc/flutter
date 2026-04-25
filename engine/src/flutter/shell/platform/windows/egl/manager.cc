@@ -185,22 +185,53 @@ bool Manager::InitializeDisplay(GpuPreference gpu_preference) {
 }
 
 bool Manager::InitializeConfig() {
-  const EGLint config_attributes[] = {EGL_RED_SIZE,   8, EGL_GREEN_SIZE,   8,
-                                      EGL_BLUE_SIZE,  8, EGL_ALPHA_SIZE,   8,
-                                      EGL_DEPTH_SIZE, 8, EGL_STENCIL_SIZE, 8,
-                                      EGL_NONE};
+  // Prefer an RGBA16 float-component config so HDR content can be composited
+  // with values >1.0 preserved. The paired surface colorspace attribute in
+  // CreateWindowSurface completes the HDR presentation chain. Falls back to
+  // the legacy RGBA8 config on systems where ANGLE can't supply F16 (e.g.
+  // older drivers, WARP software fallback, D3D11 Feature Level 9_3).
+  const EGLint f16_config_attributes[] = {
+      EGL_COLOR_COMPONENT_TYPE_EXT, EGL_COLOR_COMPONENT_TYPE_FLOAT_EXT,
+      EGL_RED_SIZE,                 16,
+      EGL_GREEN_SIZE,               16,
+      EGL_BLUE_SIZE,                16,
+      EGL_ALPHA_SIZE,               16,
+      EGL_DEPTH_SIZE,               8,
+      EGL_STENCIL_SIZE,             8,
+      EGL_NONE};
+
+  const EGLint rgba8_config_attributes[] = {
+      EGL_RED_SIZE,   8, EGL_GREEN_SIZE,   8, EGL_BLUE_SIZE,  8,
+      EGL_ALPHA_SIZE, 8, EGL_DEPTH_SIZE,   8, EGL_STENCIL_SIZE, 8,
+      EGL_NONE};
 
   EGLint num_config = 0;
 
-  EGLBoolean result =
-      ::eglChooseConfig(display_, config_attributes, &config_, 1, &num_config);
+  // Always pick an RGBA8 config as well — needed by
+  // |CreateSurfaceFromHandle| when external textures hand us 8-bit
+  // shared handles (e.g. media_kit's BGRA8 video output). Without a
+  // matching 8-bit config, ANGLE rejects pbuffer creation with
+  // EGL_BAD_PARAMETER even if |config_| is F16.
+  if (::eglChooseConfig(display_, rgba8_config_attributes, &config_rgba8_, 1,
+                        &num_config) != EGL_TRUE ||
+      num_config == 0) {
+    LogEGLError("Failed to choose RGBA8 EGL config");
+    return false;
+  }
 
-  if (result == EGL_TRUE && num_config > 0) {
+  if (::eglChooseConfig(display_, f16_config_attributes, &config_, 1,
+                        &num_config) == EGL_TRUE &&
+      num_config > 0) {
+    is_rgba16float_ = true;
+    FML_LOG(INFO) << "Chose RGBA16F EGL config (HDR-capable).";
     return true;
   }
 
-  LogEGLError("Failed to choose EGL config");
-  return false;
+  FML_LOG(INFO) << "RGBA16F config unavailable, falling back to RGBA8.";
+  // F16 unavailable — use the same RGBA8 config for both the main
+  // render context and 8-bit external textures.
+  config_ = config_rgba8_;
+  return true;
 }
 
 bool Manager::InitializeContexts() {
@@ -290,17 +321,51 @@ std::unique_ptr<WindowSurface> Manager::CreateWindowSurface(HWND hwnd,
   // Disable ANGLE's automatic surface resizing and provide an explicit size.
   // The surface will need to be destroyed and re-created if the HWND is
   // resized.
-  const EGLint surface_attributes[] = {EGL_FIXED_SIZE_ANGLE,
-                                       EGL_TRUE,
-                                       EGL_WIDTH,
-                                       static_cast<EGLint>(width),
-                                       EGL_HEIGHT,
-                                       static_cast<EGLint>(height),
-                                       EGL_NONE};
+  //
+  // For F16 configs, request two extra attributes so HDR presentation
+  // actually reaches the display:
+  //   1. EGL_GL_COLORSPACE_SCRGB_LINEAR_EXT — ANGLE's D3D11 backend
+  //      translates this into IDXGISwapChain3::SetColorSpace1 with
+  //      DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709 on the underlying swap
+  //      chain. Without the explicit call Windows treats the swap chain
+  //      as SDR regardless of the FP16 format.
+  //   2. EGL_DIRECT_COMPOSITION_ANGLE = EGL_TRUE — required because
+  //      SetColorSpace1 only applies to flip-model swap chains. ANGLE's
+  //      default Win32 path (CreateSwapChainForHwnd) creates a BitBlt-
+  //      model chain (SwapEffect SEQUENTIAL), which silently rejects
+  //      SetColorSpace1. DirectComposition routes through
+  //      CreateSwapChainForComposition which uses FLIP_SEQUENTIAL.
+  std::vector<EGLint> surface_attributes = {
+      EGL_FIXED_SIZE_ANGLE, EGL_TRUE,
+      EGL_WIDTH,            static_cast<EGLint>(width),
+      EGL_HEIGHT,           static_cast<EGLint>(height),
+  };
+  if (is_rgba16float_) {
+    surface_attributes.push_back(EGL_GL_COLORSPACE);
+    surface_attributes.push_back(EGL_GL_COLORSPACE_SCRGB_LINEAR_EXT);
+    surface_attributes.push_back(EGL_DIRECT_COMPOSITION_ANGLE);
+    surface_attributes.push_back(EGL_TRUE);
+  }
+  surface_attributes.push_back(EGL_NONE);
 
-  auto const surface = ::eglCreateWindowSurface(
+  EGLSurface surface = ::eglCreateWindowSurface(
       display_, config_, static_cast<EGLNativeWindowType>(hwnd),
-      surface_attributes);
+      surface_attributes.data());
+
+  if (is_rgba16float_ && surface == EGL_NO_SURFACE) {
+    EGLint err = ::eglGetError();
+    FML_LOG(INFO) << "HDR surface creation failed (eglError=0x" << std::hex
+                  << err << std::dec << "); retrying without HDR attributes.";
+    const EGLint fallback_attributes[] = {
+        EGL_FIXED_SIZE_ANGLE, EGL_TRUE,
+        EGL_WIDTH,            static_cast<EGLint>(width),
+        EGL_HEIGHT,           static_cast<EGLint>(height),
+        EGL_NONE};
+    surface = ::eglCreateWindowSurface(
+        display_, config_, static_cast<EGLNativeWindowType>(hwnd),
+        fallback_attributes);
+  }
+
   if (surface == EGL_NO_SURFACE) {
     LogEGLError("Surface creation failed.");
     return nullptr;
@@ -316,9 +381,14 @@ bool Manager::HasContextCurrent() {
 
 EGLSurface Manager::CreateSurfaceFromHandle(EGLenum handle_type,
                                             EGLClientBuffer handle,
-                                            const EGLint* attributes) const {
+                                            const EGLint* attributes,
+                                            bool is_rgba16float) const {
+  // Pick the config whose pixel format matches the incoming client
+  // buffer. Passing an F16 config for an 8-bit shared handle (or vice
+  // versa) makes ANGLE reject the pbuffer with EGL_BAD_PARAMETER.
+  EGLConfig config = is_rgba16float ? config_ : config_rgba8_;
   return ::eglCreatePbufferFromClientBuffer(display_, handle_type, handle,
-                                            config_, attributes);
+                                            config, attributes);
 }
 
 bool Manager::GetDevice(ID3D11Device** device) {
