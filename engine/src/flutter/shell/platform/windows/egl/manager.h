@@ -73,16 +73,19 @@ class Manager {
   // Without this distinction ANGLE rejects pbuffer creation with
   // EGL_BAD_PARAMETER when the buffer format doesn't match the config,
   // which broke media_kit video after the FP16 config landed.
-  EGLSurface CreateSurfaceFromHandle(EGLenum handle_type,
-                                     EGLClientBuffer handle,
-                                     const EGLint* attributes,
-                                     bool is_rgba16float = false) const;
+  // Virtual so unit tests can mock the handle-import path without linking
+  // ANGLE — exercised by ExternalTextureD3dTest.
+  virtual EGLSurface CreateSurfaceFromHandle(EGLenum handle_type,
+                                             EGLClientBuffer handle,
+                                             const EGLint* attributes,
+                                             bool is_rgba16float = false) const;
 
   // Gets the |EGLDisplay|.
-  EGLDisplay egl_display() const { return display_; };
+  virtual EGLDisplay egl_display() const { return display_; };
 
-  // Gets the |ID3D11Device| chosen by ANGLE.
-  bool GetDevice(ID3D11Device** device);
+  // Gets the |ID3D11Device| chosen by ANGLE. Virtual for the same reason
+  // as CreateSurfaceFromHandle above.
+  virtual bool GetDevice(ID3D11Device** device);
 
   // Get the EGL context used to render Flutter views.
   virtual Context* render_context() const;

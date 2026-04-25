@@ -207,10 +207,6 @@ bool Manager::InitializeConfig() {
 
   EGLint num_config = 0;
 
-  const char* extensions = ::eglQueryString(display_, EGL_EXTENSIONS);
-  FML_LOG(INFO) << "[HDR] EGL extensions: "
-                << (extensions ? extensions : "<null>");
-
   // Always pick an RGBA8 config as well — needed by
   // |CreateSurfaceFromHandle| when external textures hand us 8-bit
   // shared handles (e.g. media_kit's BGRA8 video output). Without a
@@ -227,11 +223,11 @@ bool Manager::InitializeConfig() {
                         &num_config) == EGL_TRUE &&
       num_config > 0) {
     is_rgba16float_ = true;
-    FML_LOG(INFO) << "[HDR] Chose RGBA16F EGL config (HDR-capable).";
+    FML_LOG(INFO) << "Chose RGBA16F EGL config (HDR-capable).";
     return true;
   }
 
-  FML_LOG(INFO) << "[HDR] RGBA16F config unavailable, falling back to RGBA8.";
+  FML_LOG(INFO) << "RGBA16F config unavailable, falling back to RGBA8.";
   // F16 unavailable — use the same RGBA8 config for both the main
   // render context and 8-bit external textures.
   config_ = config_rgba8_;
@@ -356,28 +352,18 @@ std::unique_ptr<WindowSurface> Manager::CreateWindowSurface(HWND hwnd,
       display_, config_, static_cast<EGLNativeWindowType>(hwnd),
       surface_attributes.data());
 
-  if (is_rgba16float_) {
-    if (surface != EGL_NO_SURFACE) {
-      FML_LOG(INFO) << "[HDR] Window surface created with linear-scRGB "
-                       "colorspace + DirectComposition.";
-    } else {
-      EGLint err = ::eglGetError();
-      FML_LOG(INFO) << "[HDR] HDR surface creation failed (eglError=0x"
-                    << std::hex << err << std::dec
-                    << "); retrying without HDR attributes.";
-      const EGLint fallback_attributes[] = {
-          EGL_FIXED_SIZE_ANGLE, EGL_TRUE,
-          EGL_WIDTH,            static_cast<EGLint>(width),
-          EGL_HEIGHT,           static_cast<EGLint>(height),
-          EGL_NONE};
-      surface = ::eglCreateWindowSurface(
-          display_, config_, static_cast<EGLNativeWindowType>(hwnd),
-          fallback_attributes);
-      if (surface != EGL_NO_SURFACE) {
-        FML_LOG(INFO) << "[HDR] Window surface created without HDR attributes "
-                         "(F16 only, SDR presentation).";
-      }
-    }
+  if (is_rgba16float_ && surface == EGL_NO_SURFACE) {
+    EGLint err = ::eglGetError();
+    FML_LOG(INFO) << "HDR surface creation failed (eglError=0x" << std::hex
+                  << err << std::dec << "); retrying without HDR attributes.";
+    const EGLint fallback_attributes[] = {
+        EGL_FIXED_SIZE_ANGLE, EGL_TRUE,
+        EGL_WIDTH,            static_cast<EGLint>(width),
+        EGL_HEIGHT,           static_cast<EGLint>(height),
+        EGL_NONE};
+    surface = ::eglCreateWindowSurface(
+        display_, config_, static_cast<EGLNativeWindowType>(hwnd),
+        fallback_attributes);
   }
 
   if (surface == EGL_NO_SURFACE) {
