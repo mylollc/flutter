@@ -95,6 +95,9 @@ class CompositorOpenGLTest : public WindowsTest {
     EXPECT_CALL(*egl_manager_, render_context)
         .Times(AnyNumber())
         .WillRepeatedly(Return(render_context_.get()));
+    EXPECT_CALL(*egl_manager_, is_rgba16float)
+        .Times(AnyNumber())
+        .WillRepeatedly(Return(false));
 
     FlutterWindowsEngineBuilder builder{GetContext()};
 
@@ -259,6 +262,149 @@ TEST_F(CompositorOpenGLTest, NoSurfaceIgnored) {
   const FlutterLayer* layer_ptr = &layer;
 
   EXPECT_FALSE(compositor.Present(view(), &layer_ptr, 1));
+
+  ASSERT_TRUE(compositor.CollectBackingStore(&backing_store));
+}
+
+// CreateBackingStore picks GL_RGBA16F when the EGL Manager advertises an
+// RGBA16Float framebuffer config. The chosen format reaches the engine via
+// FlutterBackingStore.open_gl.framebuffer.target, which is the only public
+// observable for the compositor's per-platform format selection.
+TEST_F(CompositorOpenGLTest, CreateBackingStoreF16) {
+  UseHeadlessEngine();
+
+  EXPECT_CALL(*egl_manager(), is_rgba16float)
+      .WillRepeatedly(Return(true));
+
+  auto compositor =
+      CompositorOpenGL{engine(), kMockResolver, /*enable_impeller=*/false};
+
+  FlutterBackingStoreConfig config = {};
+  FlutterBackingStore backing_store = {};
+
+  EXPECT_CALL(*render_context(), MakeCurrent).WillOnce(Return(true));
+  ASSERT_TRUE(compositor.CreateBackingStore(config, &backing_store));
+  EXPECT_EQ(backing_store.open_gl.framebuffer.target,
+            static_cast<uint32_t>(GL_RGBA16F));
+  ASSERT_TRUE(compositor.CollectBackingStore(&backing_store));
+}
+
+// CreateBackingStore picks GL_BGRA8_EXT when F16 is unavailable and the GLES
+// driver exposes GL_EXT_texture_format_BGRA8888. This is ANGLE's normal path
+// on Windows so it's the most common case.
+TEST_F(CompositorOpenGLTest, CreateBackingStoreBGRA8) {
+  UseHeadlessEngine();
+
+  // is_rgba16float() defaults to false via MockManager's ON_CALL.
+  // kMockResolver's MockGetStringi returns GL_ANGLE_framebuffer_blit, but
+  // the compositor probes for GL_EXT_texture_format_BGRA8888 separately
+  // through gl_->GetDescription()->HasExtension. Override the resolver to
+  // expose BGRA8888 via GL_EXTENSIONS so the BGRA branch is taken.
+  const impeller::ProcTableGLES::Resolver bgra_resolver = [](const char* name) {
+    std::string function_name{name};
+    if (function_name == "glGetStringi") {
+      return reinterpret_cast<void*>(
+          +[](GLenum name, int index) -> const unsigned char* {
+            if (name == GL_EXTENSIONS) {
+              return reinterpret_cast<const unsigned char*>(
+                  "GL_EXT_texture_format_BGRA8888");
+            }
+            return reinterpret_cast<const unsigned char*>("");
+          });
+    }
+    return kMockResolver(name);
+  };
+
+  auto compositor =
+      CompositorOpenGL{engine(), bgra_resolver, /*enable_impeller=*/false};
+
+  FlutterBackingStoreConfig config = {};
+  FlutterBackingStore backing_store = {};
+
+  EXPECT_CALL(*render_context(), MakeCurrent).WillOnce(Return(true));
+  ASSERT_TRUE(compositor.CreateBackingStore(config, &backing_store));
+  EXPECT_EQ(backing_store.open_gl.framebuffer.target,
+            static_cast<uint32_t>(GL_BGRA8_EXT));
+  ASSERT_TRUE(compositor.CollectBackingStore(&backing_store));
+}
+
+// CreateBackingStore falls back to GL_RGBA8 when neither F16 nor the BGRA
+// extension is available. This is the lowest-common-denominator path; ANGLE
+// always advertises BGRA8888 on Windows so this should not fire in practice,
+// but the upstream embedder may run against GLES drivers that don't.
+TEST_F(CompositorOpenGLTest, CreateBackingStoreRGBA8Fallback) {
+  UseHeadlessEngine();
+
+  // is_rgba16float() defaults to false. kMockResolver's MockGetStringi
+  // returns GL_ANGLE_framebuffer_blit with no BGRA8888 advertised, so the
+  // compositor falls through to GL_RGBA8. No resolver override needed.
+
+  auto compositor =
+      CompositorOpenGL{engine(), kMockResolver, /*enable_impeller=*/false};
+
+  FlutterBackingStoreConfig config = {};
+  FlutterBackingStore backing_store = {};
+
+  EXPECT_CALL(*render_context(), MakeCurrent).WillOnce(Return(true));
+  ASSERT_TRUE(compositor.CreateBackingStore(config, &backing_store));
+  EXPECT_EQ(backing_store.open_gl.framebuffer.target,
+            static_cast<uint32_t>(GL_RGBA8));
+  ASSERT_TRUE(compositor.CollectBackingStore(&backing_store));
+}
+
+// glTexImage2D is called with internal_format and pixel_type that match the
+// chosen TextureFormat. The F16 path requires GL_RGBA16F + GL_HALF_FLOAT
+// (sized internal format paired with a float pixel type) — without that pair
+// GLES rejects the texture allocation. This test asserts the pairing reaches
+// the GL driver rather than just the FlutterBackingStore output, since the
+// driver-facing call is where format mismatches manifest as silent zeros or
+// allocation failures.
+TEST_F(CompositorOpenGLTest, CreateBackingStoreF16TexImage2DArgs) {
+  UseHeadlessEngine();
+
+  EXPECT_CALL(*egl_manager(), is_rgba16float)
+      .WillRepeatedly(Return(true));
+
+  // Static state because the resolver returns a plain function pointer.
+  // Reset at test entry to avoid bleed across runs in the same binary.
+  static GLenum captured_internal_format = 0;
+  static GLenum captured_format = 0;
+  static GLenum captured_type = 0;
+  captured_internal_format = 0;
+  captured_format = 0;
+  captured_type = 0;
+
+  auto MockTexImage2D = +[](GLenum target, GLint level, GLint internal_format,
+                             GLsizei width, GLsizei height, GLint border,
+                             GLenum format, GLenum type, const void* pixels) {
+    captured_internal_format = static_cast<GLenum>(internal_format);
+    captured_format = format;
+    captured_type = type;
+  };
+
+  const impeller::ProcTableGLES::Resolver capturing_resolver =
+      [&](const char* name) {
+        std::string function_name{name};
+        if (function_name == "glTexImage2D") {
+          return reinterpret_cast<void*>(MockTexImage2D);
+        }
+        return kMockResolver(name);
+      };
+
+  auto compositor = CompositorOpenGL{engine(), capturing_resolver,
+                                     /*enable_impeller=*/false};
+
+  FlutterBackingStoreConfig config = {};
+  config.size.width = 128;
+  config.size.height = 128;
+  FlutterBackingStore backing_store = {};
+
+  EXPECT_CALL(*render_context(), MakeCurrent).WillOnce(Return(true));
+  ASSERT_TRUE(compositor.CreateBackingStore(config, &backing_store));
+
+  EXPECT_EQ(captured_internal_format, static_cast<GLenum>(GL_RGBA16F));
+  EXPECT_EQ(captured_format, static_cast<GLenum>(GL_RGBA));
+  EXPECT_EQ(captured_type, static_cast<GLenum>(GL_HALF_FLOAT));
 
   ASSERT_TRUE(compositor.CollectBackingStore(&backing_store));
 }

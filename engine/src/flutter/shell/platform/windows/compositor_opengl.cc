@@ -60,9 +60,9 @@ bool CompositorOpenGL::CreateBackingStore(
   gl_->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
   gl_->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
   gl_->TexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-  gl_->TexImage2D(GL_TEXTURE_2D, 0, format_.general_format, config.size.width,
+  gl_->TexImage2D(GL_TEXTURE_2D, 0, format_.internal_format, config.size.width,
                   config.size.height, 0, format_.general_format,
-                  GL_UNSIGNED_BYTE, nullptr);
+                  format_.pixel_type, nullptr);
   gl_->BindTexture(GL_TEXTURE_2D, 0);
 
   if (enable_impeller_) {
@@ -213,12 +213,26 @@ bool CompositorOpenGL::Initialize() {
     return false;
   }
 
-  if (gl_->GetDescription()->HasExtension("GL_EXT_texture_format_BGRA8888")) {
+  // Match the backing-store format to the EGL config: F16 when ANGLE supplied
+  // a RGBA16 float-component config, otherwise 8-bit. Keeping the backing
+  // store format in sync with the window surface ensures the blit at
+  // presentation time doesn't round-trip HDR values through an 8-bit target.
+  if (manager->is_rgba16float()) {
+    format_.sized_format = GL_RGBA16F;
+    format_.internal_format = GL_RGBA16F;
+    format_.general_format = GL_RGBA;
+    format_.pixel_type = GL_HALF_FLOAT;
+  } else if (gl_->GetDescription()->HasExtension(
+                 "GL_EXT_texture_format_BGRA8888")) {
     format_.sized_format = GL_BGRA8_EXT;
+    format_.internal_format = GL_BGRA_EXT;
     format_.general_format = GL_BGRA_EXT;
+    format_.pixel_type = GL_UNSIGNED_BYTE;
   } else {
     format_.sized_format = GL_RGBA8;
+    format_.internal_format = GL_RGBA;
     format_.general_format = GL_RGBA;
+    format_.pixel_type = GL_UNSIGNED_BYTE;
   }
 
   if (!gl_->BlitFramebuffer.IsAvailable() &&

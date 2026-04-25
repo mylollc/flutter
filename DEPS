@@ -486,7 +486,7 @@ deps = {
    Var('flutter_git') + '/third_party/freetype2' + '@' + 'bfc3453fdc85d87b45c896f68bf2e49ebdaeef0a',
 
   'engine/src/flutter/third_party/skia':
-   Var('skia_git') + '/skia.git' + '@' +  Var('skia_revision'),
+   'https://github.com/mylollc/skia.git' + '@' + '0d38303a7138407bd50bf5e836227c07f214d1c9',
 
   'engine/src/flutter/third_party/ocmock':
    Var('flutter_git') + '/third_party/ocmock' + '@' +  Var('ocmock_rev'),
@@ -525,7 +525,7 @@ deps = {
   Var('swiftshader_git') + '/SwiftShader.git' + '@' + '794b0cfce1d828d187637e6d932bae484fbe0976',
 
   'engine/src/flutter/third_party/angle':
-  Var('flutter_git') + '/third_party/angle' + '@' + '6950c6c99fa1a2d653922871ede6679d74840289',
+  'https://github.com/mylollc/angle.git' + '@' + '958144772113f18cb65d40665c08c9cae9cb9575',
 
   'engine/src/flutter/third_party/vulkan_memory_allocator':
   Var('chromium_git') + '/external/github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator' + '@' + 'c788c52156f3ef7bc7ab769cb03c110a53ac8fcb',
