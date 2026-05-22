@@ -131,12 +131,6 @@ class DirectManipulationEventHandler
       0,  // pan_x
       0,  // pan_y
   };
-  // Store the difference between the last pan offsets to determine if inertia
-  // has been cancelled in the middle of an animation.
-  float last_pan_x_ = 0.0;
-  float last_pan_y_ = 0.0;
-  float last_pan_delta_x_ = 0.0;
-  float last_pan_delta_y_ = 0.0;
 };
 
 }  // namespace flutter

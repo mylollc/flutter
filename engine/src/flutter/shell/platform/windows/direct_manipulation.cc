@@ -4,8 +4,6 @@
 
 #include "flutter/fml/logging.h"
 
-#include <algorithm>
-
 #include "flutter/shell/platform/windows/direct_manipulation.h"
 #include "flutter/shell/platform/windows/flutter_window.h"
 #include "flutter/shell/platform/windows/wchar_util.h"
@@ -71,7 +69,35 @@ HRESULT DirectManipulationEventHandler::OnViewportStatusChanged(
     return S_OK;
   }
   during_inertia_ = current == DIRECTMANIPULATION_INERTIA;
+  // Forward OS-driven inertia frames to the framework as PanZoomUpdate
+  // events so a trackpad swipe produces a continuous deceleration stream.
+  // Previously the engine fired PanZoomEnd immediately at RUNNING->INERTIA
+  // and suppressed inertia updates, which starved the framework's velocity
+  // tracker (DirectManipulation polls at 60Hz via SetTimer; brief swipes
+  // can produce as few as 1-5 RUNNING samples) and left fast swipes with
+  // no fling at all.
+  //
+  // New shape: PanZoomEnd fires at INERTIA->READY (natural decay) or
+  // RUNNING->READY (slow lift, no inertia). Inertia frames flow as
+  // PanZoomUpdate via OnContentUpdated, so the scroll position visually
+  // tracks OS inertia frame-for-frame -- same shape as macOS, where the
+  // OS provides the entire motion stream including post-finger-lift
+  // deceleration and the framework just consumes it. INERTIA->RUNNING
+  // (user re-touches the trackpad while inertia is still animating)
+  // ends the prior gesture and starts a new one; each swipe imparts its
+  // own finger-lift velocity to a fresh OS inertia decay.
+  //
+  // See flutter/flutter#126649.
   if (current == DIRECTMANIPULATION_RUNNING) {
+    // User re-touching during inertia ends the prior gesture cleanly
+    // (every PanZoomStart needs a matching PanZoomEnd) before we start
+    // the new one. The OS stops its in-flight inertia at the same
+    // moment, so the new gesture's PanZoomUpdate stream is pure user
+    // motion -- no leftover decay frames overlapping the new swipe.
+    if (previous == DIRECTMANIPULATION_INERTIA &&
+        owner_->binding_handler_delegate) {
+      owner_->binding_handler_delegate->OnPointerPanZoomEnd(GetDeviceId());
+    }
     IDirectManipulationContent* content;
     HRESULT hr = viewport->GetPrimaryContent(IID_PPV_ARGS(&content));
     if (SUCCEEDED(hr)) {
@@ -88,28 +114,25 @@ HRESULT DirectManipulationEventHandler::OnViewportStatusChanged(
     if (owner_->binding_handler_delegate) {
       owner_->binding_handler_delegate->OnPointerPanZoomStart(GetDeviceId());
     }
-  } else if (previous == DIRECTMANIPULATION_RUNNING) {
-    // Reset deltas to ensure only inertia values will be compared later.
-    last_pan_delta_x_ = 0.0;
-    last_pan_delta_y_ = 0.0;
+  } else if (previous == DIRECTMANIPULATION_RUNNING &&
+             current == DIRECTMANIPULATION_INERTIA) {
+    // Do NOT fire PanZoomEnd here. The gesture continues from the
+    // framework's point of view; OnContentUpdated will forward the OS's
+    // inertia frames as PanZoomUpdate events until INERTIA->READY (or
+    // until the user re-touches via INERTIA->RUNNING above).
+  } else if (current == DIRECTMANIPULATION_READY &&
+             (previous == DIRECTMANIPULATION_RUNNING ||
+              previous == DIRECTMANIPULATION_INERTIA)) {
+    // Gesture truly ended: either user lifted slowly with no OS inertia
+    // (RUNNING->READY) or OS inertia decayed to rest (INERTIA->READY).
     if (owner_->binding_handler_delegate) {
       owner_->binding_handler_delegate->OnPointerPanZoomEnd(GetDeviceId());
-    }
-  } else if (previous == DIRECTMANIPULATION_INERTIA) {
-    if (owner_->binding_handler_delegate &&
-        (std::max)(std::abs(last_pan_delta_x_), std::abs(last_pan_delta_y_)) >
-            0.01) {
-      owner_->binding_handler_delegate->OnScrollInertiaCancel(GetDeviceId());
     }
     // Need to reset the content transform to its original position
     // so that we are ready for the next gesture.
     // Use during_synthesized_reset_ flag to prevent sending reset also to the
     // framework.
     during_synthesized_reset_ = true;
-    last_pan_x_ = 0.0;
-    last_pan_y_ = 0.0;
-    last_pan_delta_x_ = 0.0;
-    last_pan_delta_y_ = 0.0;
     RECT rect;
     HRESULT hr = viewport->GetViewportRect(&rect);
     if (FAILED(hr)) {
@@ -145,11 +168,11 @@ HRESULT DirectManipulationEventHandler::OnContentUpdated(
     float scale = data.scale / initial_gesture_data_.scale;
     float pan_x = data.pan_x - initial_gesture_data_.pan_x;
     float pan_y = data.pan_y - initial_gesture_data_.pan_y;
-    last_pan_delta_x_ = pan_x - last_pan_x_;
-    last_pan_delta_y_ = pan_y - last_pan_y_;
-    last_pan_x_ = pan_x;
-    last_pan_y_ = pan_y;
-    if (owner_->binding_handler_delegate && !during_inertia_) {
+    // Updates flow during both RUNNING (user input) and INERTIA (OS-driven
+    // deceleration); the framework's Scrollable consumes panDelta in real
+    // time so the scroll position tracks OS motion frame-for-frame --
+    // same shape as macOS.
+    if (owner_->binding_handler_delegate) {
       owner_->binding_handler_delegate->OnPointerPanZoomUpdate(
           GetDeviceId(), pan_x, pan_y, scale, 0);
     }

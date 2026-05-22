@@ -284,111 +284,6 @@ TEST(DirectManipulationTest, TestRounding) {
                                    DIRECTMANIPULATION_INERTIA);
 }
 
-TEST(DirectManipulationTest, TestInertiaCancelSentForUserCancel) {
-  MockIDirectManipulationContent content;
-  MockWindowBindingHandlerDelegate delegate;
-  MockIDirectManipulationViewport viewport;
-  const int DISPLAY_WIDTH = 800;
-  const int DISPLAY_HEIGHT = 600;
-  auto owner = std::make_unique<DirectManipulationOwner>(nullptr);
-  owner->SetBindingHandlerDelegate(&delegate);
-  auto handler =
-      fml::MakeRefCounted<DirectManipulationEventHandler>(owner.get());
-  int32_t device_id = (int32_t)reinterpret_cast<int64_t>(handler.get());
-  // No need to mock the actual gesture, just start at the end.
-  EXPECT_CALL(viewport, GetViewportRect(_))
-      .WillOnce(::testing::Invoke([DISPLAY_WIDTH, DISPLAY_HEIGHT](RECT* rect) {
-        rect->left = 0;
-        rect->top = 0;
-        rect->right = DISPLAY_WIDTH;
-        rect->bottom = DISPLAY_HEIGHT;
-        return S_OK;
-      }));
-  EXPECT_CALL(viewport, ZoomToRect(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT, false))
-      .WillOnce(::testing::Return(S_OK));
-  EXPECT_CALL(delegate, OnPointerPanZoomEnd(device_id));
-  handler->OnViewportStatusChanged((IDirectManipulationViewport*)&viewport,
-                                   DIRECTMANIPULATION_INERTIA,
-                                   DIRECTMANIPULATION_RUNNING);
-  // Have pan_y change by 10 between inertia updates.
-  EXPECT_CALL(content, GetContentTransform(_, 6))
-      .WillOnce(::testing::Invoke([](float* transform, DWORD size) {
-        transform[0] = 1;
-        transform[4] = 0;
-        transform[5] = 100;
-        return S_OK;
-      }));
-  handler->OnContentUpdated((IDirectManipulationViewport*)&viewport,
-                            (IDirectManipulationContent*)&content);
-  EXPECT_CALL(content, GetContentTransform(_, 6))
-      .WillOnce(::testing::Invoke([](float* transform, DWORD size) {
-        transform[0] = 1;
-        transform[4] = 0;
-        transform[5] = 110;
-        return S_OK;
-      }));
-  handler->OnContentUpdated((IDirectManipulationViewport*)&viewport,
-                            (IDirectManipulationContent*)&content);
-  // This looks like an interruption in the middle of synthetic inertia because
-  // of user input.
-  EXPECT_CALL(delegate, OnScrollInertiaCancel(device_id));
-  handler->OnViewportStatusChanged((IDirectManipulationViewport*)&viewport,
-                                   DIRECTMANIPULATION_READY,
-                                   DIRECTMANIPULATION_INERTIA);
-}
-
-TEST(DirectManipulationTest, TestInertiaCamcelNotSentAtInertiaEnd) {
-  MockIDirectManipulationContent content;
-  MockWindowBindingHandlerDelegate delegate;
-  MockIDirectManipulationViewport viewport;
-  const int DISPLAY_WIDTH = 800;
-  const int DISPLAY_HEIGHT = 600;
-  auto owner = std::make_unique<DirectManipulationOwner>(nullptr);
-  owner->SetBindingHandlerDelegate(&delegate);
-  auto handler =
-      fml::MakeRefCounted<DirectManipulationEventHandler>(owner.get());
-  int32_t device_id = (int32_t)reinterpret_cast<int64_t>(handler.get());
-  // No need to mock the actual gesture, just start at the end.
-  EXPECT_CALL(viewport, GetViewportRect(_))
-      .WillOnce(::testing::Invoke([DISPLAY_WIDTH, DISPLAY_HEIGHT](RECT* rect) {
-        rect->left = 0;
-        rect->top = 0;
-        rect->right = DISPLAY_WIDTH;
-        rect->bottom = DISPLAY_HEIGHT;
-        return S_OK;
-      }));
-  EXPECT_CALL(viewport, ZoomToRect(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT, false))
-      .WillOnce(::testing::Return(S_OK));
-  EXPECT_CALL(delegate, OnPointerPanZoomEnd(device_id));
-  handler->OnViewportStatusChanged((IDirectManipulationViewport*)&viewport,
-                                   DIRECTMANIPULATION_INERTIA,
-                                   DIRECTMANIPULATION_RUNNING);
-  // Have no change in pan between events.
-  EXPECT_CALL(content, GetContentTransform(_, 6))
-      .WillOnce(::testing::Invoke([](float* transform, DWORD size) {
-        transform[0] = 1;
-        transform[4] = 0;
-        transform[5] = 140;
-        return S_OK;
-      }));
-  handler->OnContentUpdated((IDirectManipulationViewport*)&viewport,
-                            (IDirectManipulationContent*)&content);
-  EXPECT_CALL(content, GetContentTransform(_, 6))
-      .WillOnce(::testing::Invoke([](float* transform, DWORD size) {
-        transform[0] = 1;
-        transform[4] = 0;
-        transform[5] = 140;
-        return S_OK;
-      }));
-  handler->OnContentUpdated((IDirectManipulationViewport*)&viewport,
-                            (IDirectManipulationContent*)&content);
-  // OnScrollInertiaCancel should not be called.
-  EXPECT_CALL(delegate, OnScrollInertiaCancel(device_id)).Times(0);
-  handler->OnViewportStatusChanged((IDirectManipulationViewport*)&viewport,
-                                   DIRECTMANIPULATION_READY,
-                                   DIRECTMANIPULATION_INERTIA);
-}
-
 // Have some initial values in the matrix, only the differences should be
 // reported.
 TEST(DirectManipulationTest, TestGestureWithInitialData) {
@@ -451,6 +346,187 @@ TEST(DirectManipulationTest, TestGestureWithInitialData) {
                                    DIRECTMANIPULATION_RUNNING);
   handler->OnViewportStatusChanged((IDirectManipulationViewport*)&viewport,
                                    DIRECTMANIPULATION_READY,
+                                   DIRECTMANIPULATION_INERTIA);
+}
+
+// OnContentUpdated calls that arrive while DM is in the INERTIA state
+// (between RUNNING->INERTIA and INERTIA->READY) must be forwarded to the
+// framework as OnPointerPanZoomUpdate events so the OS-driven deceleration
+// stream reaches the framework's Scrollable. See flutter/flutter#126649.
+TEST(DirectManipulationTest, TestInertiaFramesForwardedToFramework) {
+  MockIDirectManipulationContent content;
+  MockWindowBindingHandlerDelegate delegate;
+  MockIDirectManipulationViewport viewport;
+  const int DISPLAY_WIDTH = 800;
+  const int DISPLAY_HEIGHT = 600;
+  auto owner = std::make_unique<DirectManipulationOwner>(nullptr);
+  owner->SetBindingHandlerDelegate(&delegate);
+  auto handler =
+      fml::MakeRefCounted<DirectManipulationEventHandler>(owner.get());
+  int32_t device_id = (int32_t)reinterpret_cast<int64_t>(handler.get());
+
+  // READY -> RUNNING: gesture starts. Initial transform at identity so
+  // subsequent pan_y values are reported verbatim to the framework.
+  EXPECT_CALL(viewport, GetPrimaryContent(_, _))
+      .WillOnce(::testing::Invoke([&content](REFIID in, void** out) {
+        *out = &content;
+        return S_OK;
+      }))
+      .RetiresOnSaturation();
+  EXPECT_CALL(content, GetContentTransform(_, 6))
+      .WillOnce(::testing::Invoke([](float* transform, DWORD size) {
+        transform[0] = 1.0f;
+        transform[4] = 0.0;
+        transform[5] = 0.0;
+        return S_OK;
+      }))
+      .RetiresOnSaturation();
+  EXPECT_CALL(delegate, OnPointerPanZoomStart(device_id));
+  handler->OnViewportStatusChanged((IDirectManipulationViewport*)&viewport,
+                                   DIRECTMANIPULATION_RUNNING,
+                                   DIRECTMANIPULATION_READY);
+
+  // RUNNING phase: one user-motion update at pan_y = 50.
+  EXPECT_CALL(content, GetContentTransform(_, 6))
+      .WillOnce(::testing::Invoke([](float* transform, DWORD size) {
+        transform[0] = 1.0f;
+        transform[4] = 0.0;
+        transform[5] = 50.0;
+        return S_OK;
+      }))
+      .RetiresOnSaturation();
+  EXPECT_CALL(delegate, OnPointerPanZoomUpdate(device_id, 0.0, 50.0, 1.0f, 0))
+      .RetiresOnSaturation();
+  handler->OnContentUpdated((IDirectManipulationViewport*)&viewport,
+                            (IDirectManipulationContent*)&content);
+
+  // RUNNING -> INERTIA: gesture stays alive; no PanZoomEnd here.
+  handler->OnViewportStatusChanged((IDirectManipulationViewport*)&viewport,
+                                   DIRECTMANIPULATION_INERTIA,
+                                   DIRECTMANIPULATION_RUNNING);
+
+  // Two OS-driven inertia frames must each produce an OnPointerPanZoomUpdate.
+  // Pan values decay (50 -> 70 -> 75) so deltas shrink each frame, mimicking
+  // natural OS inertia decay.
+  EXPECT_CALL(content, GetContentTransform(_, 6))
+      .WillOnce(::testing::Invoke([](float* transform, DWORD size) {
+        transform[0] = 1.0f;
+        transform[4] = 0.0;
+        transform[5] = 70.0;
+        return S_OK;
+      }))
+      .RetiresOnSaturation();
+  EXPECT_CALL(delegate, OnPointerPanZoomUpdate(device_id, 0.0, 70.0, 1.0f, 0))
+      .RetiresOnSaturation();
+  handler->OnContentUpdated((IDirectManipulationViewport*)&viewport,
+                            (IDirectManipulationContent*)&content);
+
+  EXPECT_CALL(content, GetContentTransform(_, 6))
+      .WillOnce(::testing::Invoke([](float* transform, DWORD size) {
+        transform[0] = 1.0f;
+        transform[4] = 0.0;
+        transform[5] = 75.0;
+        return S_OK;
+      }))
+      .RetiresOnSaturation();
+  EXPECT_CALL(delegate, OnPointerPanZoomUpdate(device_id, 0.0, 75.0, 1.0f, 0))
+      .RetiresOnSaturation();
+  handler->OnContentUpdated((IDirectManipulationViewport*)&viewport,
+                            (IDirectManipulationContent*)&content);
+
+  // Final inertia frame with no motion (delta 0) -- simulates the last
+  // settled frame before INERTIA->READY.
+  EXPECT_CALL(content, GetContentTransform(_, 6))
+      .WillOnce(::testing::Invoke([](float* transform, DWORD size) {
+        transform[0] = 1.0f;
+        transform[4] = 0.0;
+        transform[5] = 75.0;
+        return S_OK;
+      }))
+      .RetiresOnSaturation();
+  EXPECT_CALL(delegate, OnPointerPanZoomUpdate(device_id, 0.0, 75.0, 1.0f, 0))
+      .RetiresOnSaturation();
+  handler->OnContentUpdated((IDirectManipulationViewport*)&viewport,
+                            (IDirectManipulationContent*)&content);
+
+  // INERTIA -> READY: gesture truly ends now; PanZoomEnd fires once here.
+  EXPECT_CALL(delegate, OnPointerPanZoomEnd(device_id));
+  EXPECT_CALL(viewport, GetViewportRect(_))
+      .WillOnce(::testing::Invoke([DISPLAY_WIDTH, DISPLAY_HEIGHT](RECT* rect) {
+        rect->left = 0;
+        rect->top = 0;
+        rect->right = DISPLAY_WIDTH;
+        rect->bottom = DISPLAY_HEIGHT;
+        return S_OK;
+      }));
+  EXPECT_CALL(viewport, ZoomToRect(0, 0, DISPLAY_WIDTH, DISPLAY_HEIGHT, false))
+      .WillOnce(::testing::Return(S_OK));
+  handler->OnViewportStatusChanged((IDirectManipulationViewport*)&viewport,
+                                   DIRECTMANIPULATION_READY,
+                                   DIRECTMANIPULATION_INERTIA);
+}
+
+// When the user re-touches the trackpad while OS inertia is still animating
+// (INERTIA -> RUNNING transition), the prior gesture must be ended cleanly
+// with OnPointerPanZoomEnd and a fresh OnPointerPanZoomStart fired for the
+// new gesture. This guarantees every PanZoomStart has a matching PanZoomEnd
+// so the framework's gesture recognizers stay in a consistent state across
+// rapid repeated swipes.
+TEST(DirectManipulationTest, TestInertiaInterruptedByNewGesture) {
+  MockIDirectManipulationContent content;
+  MockWindowBindingHandlerDelegate delegate;
+  MockIDirectManipulationViewport viewport;
+  auto owner = std::make_unique<DirectManipulationOwner>(nullptr);
+  owner->SetBindingHandlerDelegate(&delegate);
+  auto handler =
+      fml::MakeRefCounted<DirectManipulationEventHandler>(owner.get());
+  int32_t device_id = (int32_t)reinterpret_cast<int64_t>(handler.get());
+
+  // First gesture: READY -> RUNNING fires PanZoomStart (gesture #1).
+  EXPECT_CALL(viewport, GetPrimaryContent(_, _))
+      .WillOnce(::testing::Invoke([&content](REFIID in, void** out) {
+        *out = &content;
+        return S_OK;
+      }))
+      .RetiresOnSaturation();
+  EXPECT_CALL(content, GetContentTransform(_, 6))
+      .WillOnce(::testing::Invoke([](float* transform, DWORD size) {
+        transform[0] = 1.0f;
+        transform[4] = 0.0;
+        transform[5] = 0.0;
+        return S_OK;
+      }))
+      .RetiresOnSaturation();
+  EXPECT_CALL(delegate, OnPointerPanZoomStart(device_id)).RetiresOnSaturation();
+  handler->OnViewportStatusChanged((IDirectManipulationViewport*)&viewport,
+                                   DIRECTMANIPULATION_RUNNING,
+                                   DIRECTMANIPULATION_READY);
+
+  // RUNNING -> INERTIA: no PanZoomEnd; gesture #1 still alive.
+  handler->OnViewportStatusChanged((IDirectManipulationViewport*)&viewport,
+                                   DIRECTMANIPULATION_INERTIA,
+                                   DIRECTMANIPULATION_RUNNING);
+
+  // INERTIA -> RUNNING (user re-touched the trackpad): gesture #1 ends and
+  // gesture #2 begins -- both events fire on this single status change.
+  EXPECT_CALL(delegate, OnPointerPanZoomEnd(device_id)).RetiresOnSaturation();
+  EXPECT_CALL(viewport, GetPrimaryContent(_, _))
+      .WillOnce(::testing::Invoke([&content](REFIID in, void** out) {
+        *out = &content;
+        return S_OK;
+      }))
+      .RetiresOnSaturation();
+  EXPECT_CALL(content, GetContentTransform(_, 6))
+      .WillOnce(::testing::Invoke([](float* transform, DWORD size) {
+        transform[0] = 1.0f;
+        transform[4] = 0.0;
+        transform[5] = 0.0;
+        return S_OK;
+      }))
+      .RetiresOnSaturation();
+  EXPECT_CALL(delegate, OnPointerPanZoomStart(device_id)).RetiresOnSaturation();
+  handler->OnViewportStatusChanged((IDirectManipulationViewport*)&viewport,
+                                   DIRECTMANIPULATION_RUNNING,
                                    DIRECTMANIPULATION_INERTIA);
 }
 
