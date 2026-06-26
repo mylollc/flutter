@@ -978,10 +978,7 @@ void main() {
           command: <String>['lipo', '-info', binary.path],
           stdout: 'Architectures in the fat file:',
         ),
-        FakeCommand(
-          command: <String>['lipo', binary.path, '-verify_arch', 'arm64', 'x86_64'],
-          exitCode: 1,
-        ),
+        FakeCommand(command: <String>['lipo', binary.path, '-verify_arch', 'arm64'], exitCode: 1),
       ]);
 
       await expectLater(
@@ -991,7 +988,7 @@ void main() {
             (Exception exception) => exception.toString(),
             'description',
             contains(
-              'does not contain architectures "arm64 x86_64".\n\n'
+              'does not contain architecture "arm64" (expected "arm64 x86_64").\n\n'
               'lipo -info:\nArchitectures in the fat file:',
             ),
           ),
@@ -1018,7 +1015,8 @@ void main() {
           command: <String>['lipo', '-info', binary.path],
           stdout: 'Architectures in the fat file:',
         ),
-        FakeCommand(command: <String>['lipo', binary.path, '-verify_arch', 'arm64', 'x86_64']),
+        FakeCommand(command: <String>['lipo', binary.path, '-verify_arch', 'arm64']),
+        FakeCommand(command: <String>['lipo', binary.path, '-verify_arch', 'x86_64']),
         FakeCommand(
           command: <String>[
             'lipo',
@@ -1182,7 +1180,8 @@ void main() {
           command: <String>['lipo', '-info', binary.path],
           stdout: 'Architectures in the fat file:',
         ),
-        FakeCommand(command: <String>['lipo', binary.path, '-verify_arch', 'arm64', 'x86_64']),
+        FakeCommand(command: <String>['lipo', binary.path, '-verify_arch', 'arm64']),
+        FakeCommand(command: <String>['lipo', binary.path, '-verify_arch', 'x86_64']),
         FakeCommand(
           command: <String>[
             'lipo',
