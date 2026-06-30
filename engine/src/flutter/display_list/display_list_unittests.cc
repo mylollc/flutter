@@ -250,6 +250,28 @@ TEST_F(DisplayListTest, EmptyRebuild) {
   ASSERT_TRUE(dl2->Equals(dl3));
 }
 
+TEST_F(DisplayListTest, GetImageInfoDefaultsToUnknownFormat) {
+  DisplayListBuilder builder(DlRect::MakeWH(50, 30));
+  SkImageInfo info = builder.GetImageInfo();
+  EXPECT_EQ(info.width(), 50);
+  EXPECT_EQ(info.height(), 30);
+  EXPECT_EQ(info.colorType(), kUnknown_SkColorType);
+  EXPECT_EQ(info.colorSpace(), nullptr);
+}
+
+TEST_F(DisplayListTest, GetImageInfoReportsSuppliedDestinationFormat) {
+  sk_sp<SkColorSpace> color_space = SkColorSpace::MakeSRGBLinear();
+  DisplayListBuilder builder(DlRect::MakeWH(50, 30),
+                             /*prepare_rtree=*/false,
+                             /*dst_color_type=*/kRGBA_F16_SkColorType,
+                             /*dst_color_space=*/color_space);
+  SkImageInfo info = builder.GetImageInfo();
+  EXPECT_EQ(info.width(), 50);
+  EXPECT_EQ(info.height(), 30);
+  EXPECT_EQ(info.colorType(), kRGBA_F16_SkColorType);
+  EXPECT_TRUE(SkColorSpace::Equals(info.colorSpace(), color_space.get()));
+}
+
 TEST_F(DisplayListTest, NopReusedBuildIsReallyEmpty) {
   DisplayListBuilder builder;
   builder.DrawRect(DlRect::MakeLTRB(0.0f, 0.0f, 10.0f, 10.0f), DlPaint());

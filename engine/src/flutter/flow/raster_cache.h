@@ -17,6 +17,7 @@
 #include "flutter/fml/macros.h"
 #include "flutter/fml/memory/weak_ptr.h"
 #include "flutter/fml/trace_event.h"
+#include "third_party/skia/include/core/SkColorType.h"
 #include "third_party/skia/include/core/SkMatrix.h"
 #include "third_party/skia/include/core/SkRect.h"
 
@@ -121,6 +122,11 @@ class RasterCache {
   struct Context {
     GrDirectContext* gr_context;
     const sk_sp<SkColorSpace> dst_color_space;
+    // Color type of the destination surface. The cache offscreen must match
+    // it: an 8-bit N32 offscreen for an F16 / wide-gamut destination forces
+    // cached content through a lower-precision, mis-color-managed intermediate.
+    // Defaults to N32 for callers that do not supply one.
+    SkColorType dst_color_type = kN32_SkColorType;
     const SkMatrix& matrix;
     const SkRect& logical_rect;
     const char* flow_type;

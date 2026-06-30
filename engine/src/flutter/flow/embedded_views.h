@@ -385,7 +385,10 @@ class EmbedderViewSlice {
 
 class DisplayListEmbedderViewSlice : public EmbedderViewSlice {
  public:
-  explicit DisplayListEmbedderViewSlice(DlRect view_bounds);
+  explicit DisplayListEmbedderViewSlice(
+      DlRect view_bounds,
+      SkColorType dst_color_type = kUnknown_SkColorType,
+      sk_sp<SkColorSpace> dst_color_space = nullptr);
   ~DisplayListEmbedderViewSlice() override = default;
 
   DlCanvas* canvas() override;

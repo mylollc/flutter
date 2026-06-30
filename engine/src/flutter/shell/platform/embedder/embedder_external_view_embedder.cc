@@ -72,7 +72,8 @@ void EmbedderExternalViewEmbedder::PrepareFlutterView(
   pending_surface_transformation_ = GetSurfaceTransformation();
 
   pending_views_[kRootViewIdentifier] = std::make_unique<EmbedderExternalView>(
-      pending_frame_size_, pending_surface_transformation_);
+      pending_frame_size_, pending_surface_transformation_,
+      render_target_color_type_, render_target_color_space_);
   composition_order_.push_back(kRootViewIdentifier);
 }
 
@@ -87,7 +88,9 @@ void EmbedderExternalViewEmbedder::PrerollCompositeEmbeddedView(
       pending_frame_size_,              // frame size
       pending_surface_transformation_,  // surface xformation
       vid,                              // view identifier
-      std::move(params)                 // embedded view params
+      std::move(params),                // embedded view params
+      render_target_color_type_,        // dst color type
+      render_target_color_space_        // dst color space
   );
   composition_order_.push_back(vid);
 }
@@ -443,16 +446,29 @@ void EmbedderExternalViewEmbedder::SubmitFlutterView(
   }
 
   builder.PrepareBackingStore([&](const DlISize& frame_size) {
+    std::unique_ptr<EmbedderRenderTarget> target;
     if (!avoid_backing_store_cache_) {
-      std::unique_ptr<EmbedderRenderTarget> target =
-          render_target_cache.GetRenderTarget(
-              EmbedderExternalView::RenderTargetDescriptor(frame_size));
-      if (target != nullptr) {
-        return target;
+      target = render_target_cache.GetRenderTarget(
+          EmbedderExternalView::RenderTargetDescriptor(frame_size));
+    }
+    if (target == nullptr) {
+      auto config = MakeBackingStoreConfig(flutter_view_id, frame_size);
+      target = create_render_target_callback_(context, aiks_context, config);
+    }
+    // Capture the render target's color type + space (stable for the engine's
+    // lifetime) so the next frame's recording slices report the real
+    // destination format to the layer tree / raster cache, instead of the
+    // recorder's MakeUnknown. Skia path only; the Impeller path has no
+    // SkSurface (GetSkiaSurface() is null) and does its own color-managed
+    // caching, so it is intentionally left untouched here.
+    if (target) {
+      if (sk_sp<SkSurface> surface = target->GetSkiaSurface()) {
+        const SkImageInfo& info = surface->imageInfo();
+        render_target_color_type_ = info.colorType();
+        render_target_color_space_ = info.refColorSpace();
       }
     }
-    auto config = MakeBackingStoreConfig(flutter_view_id, frame_size);
-    return create_render_target_callback_(context, aiks_context, config);
+    return target;
   });
 
   // This is where unused render targets will be collected. Control may flow
