@@ -14,6 +14,8 @@
 #include "flutter/fml/macros.h"
 #include "flutter/shell/platform/embedder/embedder_external_view.h"
 #include "flutter/shell/platform/embedder/embedder_render_target_cache.h"
+#include "third_party/skia/include/core/SkColorSpace.h"
+#include "third_party/skia/include/core/SkColorType.h"
 
 namespace flutter {
 
@@ -123,6 +125,17 @@ class EmbedderExternalViewEmbedder final : public ExternalViewEmbedder {
   std::vector<EmbedderExternalView::ViewIdentifier> composition_order_;
   // The render target caches for views. Each key is a view ID.
   std::unordered_map<int64_t, EmbedderRenderTargetCache> render_target_caches_;
+
+  // Color type + space of the render targets this embedder allocates, captured
+  // from the most recent render target. The render-target format is stable for
+  // the engine's lifetime, so this is reused to seed the recording slices of
+  // subsequent frames — letting the layer tree / raster cache color-manage
+  // against the real destination instead of a format-agnostic recorder (whose
+  // GetImageInfo() is otherwise MakeUnknown). kUnknown until first learned;
+  // since raster caching only activates after several stable frames, the real
+  // format is always known by the time anything is cached.
+  SkColorType render_target_color_type_ = kUnknown_SkColorType;
+  sk_sp<SkColorSpace> render_target_color_space_;
 
   void Reset();
 

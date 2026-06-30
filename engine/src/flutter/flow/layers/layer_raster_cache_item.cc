@@ -151,6 +151,9 @@ bool LayerRasterCacheItem::TryToPrepareRasterCache(const PaintContext& context,
           // clang-format off
           .gr_context         = context.gr_context,
           .dst_color_space    = context.dst_color_space,
+          .dst_color_type     = context.canvas
+                                    ? context.canvas->GetImageInfo().colorType()
+                                    : kN32_SkColorType,
           .matrix             = matrix_,
           .logical_rect       = *paint_bounds,
           .flow_type          = flow_type,

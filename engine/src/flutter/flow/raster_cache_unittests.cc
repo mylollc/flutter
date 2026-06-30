@@ -31,6 +31,48 @@ TEST(RasterCache, SimpleInitialization) {
   ASSERT_TRUE(true);
 }
 
+TEST(RasterCache, RasterizeMatchesDestinationColorType) {
+  // The cache offscreen must be allocated with the destination surface's color
+  // type. An F16 entry is 8 bytes/px versus N32's 4, so a same-size F16 entry
+  // is larger — proving Rasterize honored Context.dst_color_type instead of
+  // unconditionally allocating N32.
+  RasterCache cache;
+  const SkMatrix matrix = SkMatrix::I();
+  const SkRect logical_rect = SkRect::MakeWH(50, 30);
+  auto draw = [](DlCanvas*) {};
+  auto checkerboard = [](DlCanvas*, const DlRect&) {};
+
+  RasterCache::Context n32_context = {
+      .gr_context = nullptr,
+      .dst_color_space = SkColorSpace::MakeSRGB(),
+      .dst_color_type = kN32_SkColorType,
+      .matrix = matrix,
+      .logical_rect = logical_rect,
+      .flow_type = "RasterCacheTest",
+  };
+  std::unique_ptr<RasterCacheResult> n32 =
+      cache.Rasterize(n32_context, nullptr, draw, checkerboard);
+
+  RasterCache::Context f16_context = {
+      .gr_context = nullptr,
+      .dst_color_space = SkColorSpace::MakeSRGBLinear(),
+      .dst_color_type = kRGBA_F16_SkColorType,
+      .matrix = matrix,
+      .logical_rect = logical_rect,
+      .flow_type = "RasterCacheTest",
+  };
+  std::unique_ptr<RasterCacheResult> f16 =
+      cache.Rasterize(f16_context, nullptr, draw, checkerboard);
+
+  ASSERT_TRUE(n32);
+  ASSERT_TRUE(f16);
+  EXPECT_EQ(n32->image_dimensions(), f16->image_dimensions());
+  // Same dimensions, but F16 is 8 bytes/px vs N32's 4, so the F16 entry is
+  // strictly larger. If Rasterize ignored dst_color_type and fell back to N32,
+  // the two would be equal.
+  EXPECT_GT(f16->image_bytes(), n32->image_bytes());
+}
+
 TEST(RasterCache, MetricsOmitUnpopulatedEntries) {
   size_t threshold = 2;
   flutter::RasterCache cache(threshold);

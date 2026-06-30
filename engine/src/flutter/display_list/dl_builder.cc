@@ -127,8 +127,12 @@ static const DlRect& ProtectEmpty(const DlRect& rect) {
 }
 
 DisplayListBuilder::DisplayListBuilder(const DlRect& cull_rect,
-                                       bool prepare_rtree)
-    : original_cull_rect_(ProtectEmpty(cull_rect)) {
+                                       bool prepare_rtree,
+                                       SkColorType dst_color_type,
+                                       sk_sp<SkColorSpace> dst_color_space)
+    : original_cull_rect_(ProtectEmpty(cull_rect)),
+      dst_color_type_(dst_color_type),
+      dst_color_space_(std::move(dst_color_space)) {
   Init(prepare_rtree);
 }
 
@@ -153,6 +157,10 @@ DlISize DisplayListBuilder::GetBaseLayerDimensions() const {
 
 SkImageInfo DisplayListBuilder::GetImageInfo() const {
   DlISize size = GetBaseLayerDimensions();
+  if (dst_color_type_ != kUnknown_SkColorType) {
+    return SkImageInfo::Make(size.width, size.height, dst_color_type_,
+                             kPremul_SkAlphaType, dst_color_space_);
+  }
   return SkImageInfo::MakeUnknown(size.width, size.height);
 }
 

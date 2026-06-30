@@ -6,10 +6,15 @@
 
 namespace flutter {
 
-DisplayListEmbedderViewSlice::DisplayListEmbedderViewSlice(DlRect view_bounds) {
+DisplayListEmbedderViewSlice::DisplayListEmbedderViewSlice(
+    DlRect view_bounds,
+    SkColorType dst_color_type,
+    sk_sp<SkColorSpace> dst_color_space) {
   builder_ = std::make_unique<DisplayListBuilder>(
       /*bounds=*/view_bounds,
-      /*prepare_rtree=*/true);
+      /*prepare_rtree=*/true,
+      /*dst_color_type=*/dst_color_type,
+      /*dst_color_space=*/std::move(dst_color_space));
 }
 
 DlCanvas* DisplayListEmbedderViewSlice::canvas() {

@@ -26,21 +26,32 @@ static DlISize TransformedSurfaceSize(const DlISize& size,
 
 EmbedderExternalView::EmbedderExternalView(
     const DlISize& frame_size,
-    const DlMatrix& surface_transformation)
-    : EmbedderExternalView(frame_size, surface_transformation, {}, nullptr) {}
+    const DlMatrix& surface_transformation,
+    SkColorType dst_color_type,
+    sk_sp<SkColorSpace> dst_color_space)
+    : EmbedderExternalView(frame_size,
+                           surface_transformation,
+                           {},
+                           nullptr,
+                           dst_color_type,
+                           std::move(dst_color_space)) {}
 
 EmbedderExternalView::EmbedderExternalView(
     const DlISize& frame_size,
     const DlMatrix& surface_transformation,
     ViewIdentifier view_identifier,
-    std::unique_ptr<EmbeddedViewParams> params)
+    std::unique_ptr<EmbeddedViewParams> params,
+    SkColorType dst_color_type,
+    sk_sp<SkColorSpace> dst_color_space)
     : render_surface_size_(
           TransformedSurfaceSize(frame_size, surface_transformation)),
       surface_transformation_(surface_transformation),
       view_identifier_(view_identifier),
       embedded_view_params_(std::move(params)),
       slice_(std::make_unique<DisplayListEmbedderViewSlice>(
-          DlRect::MakeSize(frame_size))) {}
+          DlRect::MakeSize(frame_size),
+          dst_color_type,
+          std::move(dst_color_space))) {}
 
 EmbedderExternalView::~EmbedderExternalView() = default;
 

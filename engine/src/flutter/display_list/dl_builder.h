@@ -18,6 +18,8 @@
 #include "flutter/display_list/utils/dl_comparable.h"
 #include "flutter/display_list/utils/dl_matrix_clip_tracker.h"
 #include "flutter/fml/macros.h"
+#include "third_party/skia/include/core/SkColorSpace.h"
+#include "third_party/skia/include/core/SkColorType.h"
 
 namespace flutter {
 
@@ -35,8 +37,16 @@ class DisplayListBuilder final : public virtual DlCanvas,
   explicit DisplayListBuilder(bool prepare_rtree)
       : DisplayListBuilder(kMaxCullRect, prepare_rtree) {}
 
+  // [dst_color_type]/[dst_color_space] describe the surface this builder's
+  // display list will ultimately be rasterized into. When set (color type !=
+  // kUnknown), GetImageInfo() reports them so color-managed consumers (e.g.
+  // the raster cache, which rasterizes eagerly while recording) match the real
+  // destination instead of an unknown/null-color-space surface. Defaults
+  // preserve the format-agnostic MakeUnknown() behavior.
   explicit DisplayListBuilder(const DlRect& cull_rect = kMaxCullRect,
-                              bool prepare_rtree = false);
+                              bool prepare_rtree = false,
+                              SkColorType dst_color_type = kUnknown_SkColorType,
+                              sk_sp<SkColorSpace> dst_color_space = nullptr);
 
   DisplayListBuilder(DlScalar width, DlScalar height)
       : DisplayListBuilder(DlRect::MakeWH(width, height)) {}
@@ -640,6 +650,10 @@ class DisplayListBuilder final : public virtual DlCanvas,
   };
 
   const DlRect original_cull_rect_;
+  // Destination surface format this builder records for; reported by
+  // GetImageInfo() when [dst_color_type_] != kUnknown (else MakeUnknown).
+  const SkColorType dst_color_type_ = kUnknown_SkColorType;
+  const sk_sp<SkColorSpace> dst_color_space_;
   std::vector<SaveInfo> save_stack_;
   std::optional<RTreeData> rtree_data_;
 

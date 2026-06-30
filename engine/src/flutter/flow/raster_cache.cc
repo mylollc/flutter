@@ -86,8 +86,20 @@ std::unique_ptr<RasterCacheResult> RasterCache::Rasterize(
   SkRect dest_rect =
       RasterCacheUtil::GetRoundedOutDeviceBounds(context.logical_rect, matrix);
 
-  const SkImageInfo image_info = SkImageInfo::MakeN32Premul(
-      dest_rect.width(), dest_rect.height(), context.dst_color_space);
+  // The cache entry must match the precision and color space of the
+  // destination surface. Unconditionally allocating an 8-bit N32 offscreen
+  // (the historical behavior) for an F16 / wide-gamut destination routes every
+  // cached layer through a lower-precision, mis-color-managed intermediate,
+  // producing visibly dimmed or incorrect cached content. The destination
+  // color type and color space are supplied via the Context (ultimately from
+  // the destination canvas's image info); fall back to N32 only when the
+  // destination color type is unknown.
+  const SkColorType cache_color_type =
+      (context.dst_color_type == kUnknown_SkColorType) ? kN32_SkColorType
+                                                       : context.dst_color_type;
+  const SkImageInfo image_info =
+      SkImageInfo::Make(dest_rect.width(), dest_rect.height(), cache_color_type,
+                        kPremul_SkAlphaType, context.dst_color_space);
 
   sk_sp<SkSurface> surface =
       context.gr_context

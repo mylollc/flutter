@@ -76,13 +76,21 @@ class EmbedderExternalView {
                                           ViewIdentifier::Hash,
                                           ViewIdentifier::Equal>;
 
+  // [dst_color_type]/[dst_color_space] describe the render target this view's
+  // contents will be rasterized into, forwarded to the recording slice so the
+  // layer tree / raster cache color-manage against the real destination. The
+  // defaults preserve the format-agnostic recording behavior.
   EmbedderExternalView(const DlISize& frame_size,
-                       const DlMatrix& surface_transformation);
+                       const DlMatrix& surface_transformation,
+                       SkColorType dst_color_type = kUnknown_SkColorType,
+                       sk_sp<SkColorSpace> dst_color_space = nullptr);
 
   EmbedderExternalView(const DlISize& frame_size,
                        const DlMatrix& surface_transformation,
                        ViewIdentifier view_identifier,
-                       std::unique_ptr<EmbeddedViewParams> params);
+                       std::unique_ptr<EmbeddedViewParams> params,
+                       SkColorType dst_color_type = kUnknown_SkColorType,
+                       sk_sp<SkColorSpace> dst_color_space = nullptr);
 
   ~EmbedderExternalView();
 
