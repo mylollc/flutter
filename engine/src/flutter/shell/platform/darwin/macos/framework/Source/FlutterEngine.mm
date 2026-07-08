@@ -1705,6 +1705,22 @@ static void SetThreadPriority(FlutterThreadPriority priority) {
   return _embedderAPI.UnregisterExternalTexture(_engine, textureID) == kSuccess;
 }
 
+- (void)releaseOnRenderThread:(id)object {
+  if (!object) {
+    return;
+  }
+  // Transfer an owning +1 reference to the render-thread task's baton, then let
+  // the captureless callback drop it (dealloc) once the raster runner drains.
+  void* baton = (__bridge_retained void*)object;
+  FlutterEngineResult result = _embedderAPI.PostRenderThreadTask(
+      _engine, [](void* b) { CFBridgingRelease(b); }, baton);
+  if (result != kSuccess) {
+    // The callback will not run (e.g. engine shutting down); release here so
+    // the reference is not leaked.
+    CFBridgingRelease(baton);
+  }
+}
+
 #pragma mark - Task runner integration
 
 - (void)postMainThreadTask:(FlutterTask)task targetTimeInNanoseconds:(uint64_t)targetTime {

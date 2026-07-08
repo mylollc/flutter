@@ -66,6 +66,33 @@
 }
 @end
 
+// A FlutterTexture whose -dealloc records the thread it runs on and signals a
+// latch. A registered texture is retained by the internal FlutterExternalTexture
+// wrapper, so this deallocates exactly when the wrapper does — letting a test
+// observe when, and on which thread, the wrapper is freed.
+@interface ThreadRecordingTexture : NSObject <FlutterTexture>
+- (instancetype)initWithDeallocHandler:(void (^)(void))handler;
+@end
+
+@implementation ThreadRecordingTexture {
+  void (^_onDealloc)(void);
+}
+- (instancetype)initWithDeallocHandler:(void (^)(void))handler {
+  if (self = [super init]) {
+    _onDealloc = [handler copy];
+  }
+  return self;
+}
+- (CVPixelBufferRef)copyPixelBuffer {
+  return NULL;
+}
+- (void)dealloc {
+  if (_onDealloc) {
+    _onDealloc();
+  }
+}
+@end
+
 #pragma mark -
 
 @interface FakeLifecycleProvider : NSObject <FlutterAppLifecycleProvider, NSApplicationDelegate>
@@ -694,6 +721,75 @@ TEST_F(FlutterEngineTest, FlutterTextureRegistryDoesNotReturnEngine) {
   // retained via the texture registry.
   EXPECT_NE(textureRegistry, nil);
   EXPECT_EQ(weakEngine, nil);
+}
+
+// -releaseOnRenderThread: must extend the object's lifetime past the calling
+// (platform) thread and release it on the render (raster) thread, never
+// synchronously. This is the primitive underpinning the external-texture
+// use-after-free fix below.
+TEST_F(FlutterEngineTest, ReleaseOnRenderThreadDefersReleaseOffCallingThread) {
+  FlutterEngine* engine = GetFlutterEngine();
+  ASSERT_TRUE([engine runWithEntrypoint:@"main"]);
+
+  NSThread* callingThread = [NSThread currentThread];
+  __block NSThread* deallocThread = nil;
+  fml::AutoResetWaitableEvent latch;
+  fml::AutoResetWaitableEvent* latchPtr = &latch;
+
+  @autoreleasepool {
+    ThreadRecordingTexture* sentinel =
+        [[ThreadRecordingTexture alloc] initWithDeallocHandler:^{
+          deallocThread = [NSThread currentThread];
+          latchPtr->Signal();
+        }];
+    [engine releaseOnRenderThread:sentinel];
+    // Drop the only other strong reference; the render-thread task now solely
+    // owns the sentinel and must release it when the raster runner drains.
+    sentinel = nil;
+  }
+
+  ASSERT_FALSE(latch.WaitWithTimeout(fml::TimeDelta::FromSeconds(30)));
+  EXPECT_NE(deallocThread, nil);
+  EXPECT_NE(deallocThread, callingThread);
+}
+
+// Regression test: unregistering an external texture used to free its
+// FlutterExternalTexture wrapper synchronously on the platform thread while the
+// raster thread could still be resolving it (reading a raw pointer into the
+// wrapper's storage) — a use-after-free. The wrapper's release must instead be
+// deferred onto the raster task runner. See
+// https://github.com/flutter/flutter/issues/78056.
+TEST_F(FlutterEngineTest, UnregisterTextureDefersWrapperReleaseToRenderThread) {
+  FlutterEngine* engine = GetFlutterEngine();
+  ASSERT_TRUE([engine runWithEntrypoint:@"main"]);
+
+  id<FlutterPluginRegistrar> registrar = [engine registrarForPlugin:@"texture_test"];
+  id<FlutterTextureRegistry> textures = registrar.textures;
+
+  NSThread* callingThread = [NSThread currentThread];
+  __block NSThread* deallocThread = nil;
+  fml::AutoResetWaitableEvent latch;
+  fml::AutoResetWaitableEvent* latchPtr = &latch;
+  int64_t textureID = 0;
+
+  @autoreleasepool {
+    ThreadRecordingTexture* texture =
+        [[ThreadRecordingTexture alloc] initWithDeallocHandler:^{
+          deallocThread = [NSThread currentThread];
+          latchPtr->Signal();
+        }];
+    textureID = [textures registerTexture:texture];
+    EXPECT_NE(textureID, 0);
+    // The internal wrapper retains the texture; drop the local reference so the
+    // texture deallocates exactly when the wrapper does.
+    texture = nil;
+  }
+
+  [textures unregisterTexture:textureID];
+
+  ASSERT_FALSE(latch.WaitWithTimeout(fml::TimeDelta::FromSeconds(30)));
+  EXPECT_NE(deallocThread, nil);
+  EXPECT_NE(deallocThread, callingThread);
 }
 
 TEST_F(FlutterEngineTest, PublishedValueNilForUnknownPlugin) {
