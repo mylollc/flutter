@@ -183,6 +183,19 @@ typedef NS_ENUM(NSInteger, FlutterAppExitResponse) {
  */
 - (BOOL)unregisterTextureWithID:(int64_t)textureID;
 
+/**
+ * Extends the lifetime of `object` until the engine's render (raster) task
+ * runner next drains, then releases it there. Used to defer teardown that must
+ * not race in-flight rasterization — notably freeing an external-texture
+ * wrapper only after any queued ResolveTexture that borrows its storage has run
+ * (the raster runner is a single FIFO queue). Retains `object` on the calling
+ * thread and releases it on the render thread; both are safe as reference
+ * counting is atomic. May be called from any thread while the engine is
+ * running; if the task cannot be posted (e.g. during shutdown) `object` is
+ * released synchronously instead.
+ */
+- (void)releaseOnRenderThread:(nullable id)object;
+
 - (nonnull FlutterPlatformViewController*)platformViewController;
 
 /**
