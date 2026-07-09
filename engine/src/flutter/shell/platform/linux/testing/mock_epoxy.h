@@ -28,6 +28,7 @@ class MockEpoxy {
                EGLenum target,
                EGLClientBuffer buffer,
                const EGLint* attrib_list));
+  MOCK_METHOD(EGLContext, eglGetCurrentContext, ());
   MOCK_METHOD(void, glClearColor, (GLfloat r, GLfloat g, GLfloat b, GLfloat a));
   MOCK_METHOD(void,
               glBlitFramebuffer,

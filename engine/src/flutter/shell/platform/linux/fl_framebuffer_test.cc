@@ -40,6 +40,27 @@ TEST(FlFramebufferTest, ResourcesRemoved) {
   g_object_unref(framebuffer);
 }
 
+// Regression test: during shutdown the window (and its EGL context) can be
+// destroyed before the compositor tears down its framebuffers. Disposing a
+// framebuffer with no current context must NOT issue gl* deletes, because epoxy
+// aborts when it cannot resolve a GL entry point without a current context.
+TEST(FlFramebufferTest, ResourcesRetainedWithoutContext) {
+  ::testing::NiceMock<flutter::testing::MockEpoxy> epoxy;
+
+  EXPECT_CALL(epoxy, glGenFramebuffers);
+  EXPECT_CALL(epoxy, glGenTextures);
+  EXPECT_CALL(epoxy, glGenRenderbuffers);
+  FlFramebuffer* framebuffer = fl_framebuffer_new(GL_RGB, 100, 100, FALSE);
+
+  // Simulate the context being gone by the time the framebuffer is disposed.
+  EXPECT_CALL(epoxy, eglGetCurrentContext)
+      .WillRepeatedly(::testing::Return(EGL_NO_CONTEXT));
+  EXPECT_CALL(epoxy, glDeleteFramebuffers).Times(0);
+  EXPECT_CALL(epoxy, glDeleteTextures).Times(0);
+  EXPECT_CALL(epoxy, glDeleteRenderbuffers).Times(0);
+  g_object_unref(framebuffer);
+}
+
 TEST(FlFramebufferTest, Sibling) {
   ::testing::NiceMock<flutter::testing::MockEpoxy> epoxy;
 
