@@ -62,6 +62,12 @@ static EGLint mock_error = EGL_SUCCESS;
 
 MockEpoxy::MockEpoxy() {
   mock = this;
+
+  // Default to a valid current context so tests that exercise GL resource
+  // creation/teardown behave as if a context is bound. Individual tests can
+  // override this (e.g. Return(EGL_NO_CONTEXT)) to simulate a lost context.
+  ON_CALL(*this, eglGetCurrentContext)
+      .WillByDefault(::testing::Return(&mock_context));
 }
 
 MockEpoxy::~MockEpoxy() {
@@ -153,6 +159,9 @@ EGLContext _eglCreateContext(EGLDisplay dpy,
 }
 
 EGLContext _eglGetCurrentContext() {
+  if (mock) {
+    return mock->eglGetCurrentContext();
+  }
   return &mock_context;
 }
 

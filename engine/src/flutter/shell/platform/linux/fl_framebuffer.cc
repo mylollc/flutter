@@ -53,9 +53,15 @@ static EGLImage create_egl_image(GLuint texture_id) {
 static void fl_framebuffer_dispose(GObject* object) {
   FlFramebuffer* self = FL_FRAMEBUFFER(object);
 
-  glDeleteFramebuffers(1, &self->framebuffer_id);
-  glDeleteTextures(1, &self->texture_id);
-  glDeleteRenderbuffers(1, &self->depth_stencil);
+  // Only delete GL objects if a context is current. During shutdown the EGL
+  // context can already be gone, and issuing a gl* call without one makes epoxy
+  // fail to resolve the entry point and abort(); leaking at process exit is
+  // harmless. eglGetCurrentContext() itself is safe to call with no context.
+  if (eglGetCurrentContext() != EGL_NO_CONTEXT) {
+    glDeleteFramebuffers(1, &self->framebuffer_id);
+    glDeleteTextures(1, &self->texture_id);
+    glDeleteRenderbuffers(1, &self->depth_stencil);
+  }
 
   G_OBJECT_CLASS(fl_framebuffer_parent_class)->dispose(object);
 }

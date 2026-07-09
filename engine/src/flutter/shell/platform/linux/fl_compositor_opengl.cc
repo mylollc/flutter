@@ -168,14 +168,9 @@ static void setup_shader(FlCompositorOpenGL* self) {
                GL_STATIC_DRAW);
 }
 
+// Deletes the shader program and vertex buffer. The caller must have made the
+// OpenGL context current.
 static void cleanup_shader(FlCompositorOpenGL* self) {
-  if (!fl_opengl_manager_make_current(self->opengl_manager)) {
-    g_warning(
-        "Failed to cleanup compositor shaders, unable to make OpenGL context "
-        "current");
-    return;
-  }
-
   if (self->program != 0) {
     glDeleteProgram(self->program);
   }
@@ -416,11 +411,26 @@ static gboolean fl_compositor_opengl_render(FlCompositor* compositor,
 static void fl_compositor_opengl_dispose(GObject* object) {
   FlCompositorOpenGL* self = FL_COMPOSITOR_OPENGL(object);
 
-  cleanup_shader(self);
+  // Release GL resources while the context is current. During shutdown the
+  // window (and its EGL context) may already be gone; if the context can't be
+  // made current, skip the GL deletes rather than aborting — the process is
+  // exiting so leaking these ids is harmless. FlFramebuffer's dispose applies
+  // the same guard as a backstop.
+  if (self->opengl_manager != nullptr &&
+      fl_opengl_manager_make_current(self->opengl_manager)) {
+    cleanup_shader(self);
+  } else {
+    g_warning(
+        "Unable to make OpenGL context current; skipping compositor GL "
+        "resource cleanup");
+  }
+
+  // Dispose the framebuffer before releasing the OpenGL manager so its GL
+  // objects are deleted while the context is still current.
+  g_clear_object(&self->framebuffer);
 
   g_clear_object(&self->task_runner);
   g_clear_object(&self->opengl_manager);
-  g_clear_object(&self->framebuffer);
   g_clear_pointer(&self->pixels, g_free);
   g_mutex_clear(&self->frame_mutex);
 
