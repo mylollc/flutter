@@ -136,7 +136,14 @@ void fl_scrolling_manager_handle_scroll_event(FlScrollingManager* self,
           event_x * scale_factor, event_y * scale_factor, kPanZoomUpdate,
           self->pan_x, self->pan_y, 1, 0);
     }
-  } else {
+  } else if (scroll_delta_x != 0 || scroll_delta_y != 0) {
+    // A discrete scroll's deltas are delivered as a scroll signal:
+    // fl_engine_send_mouse_pointer_event sets signal_kind to kScroll only
+    // when a delta is non-zero, and the (arbitrary) kMove phase is ignored.
+    // GDK also emits zero-delta smooth-scroll boundary events; forwarding one
+    // sends a kMove with no signal and no button, a move on a pointer that was
+    // never pressed, which the engine's pointer-data converter rejects. A
+    // zero-delta scroll is a no-op, so drop it.
     self->last_x = event_x * scale_factor;
     self->last_y = event_y * scale_factor;
     fl_engine_send_mouse_pointer_event(

@@ -130,6 +130,48 @@ TEST(FlScrollingManagerTest, DiscreteScrolling) {
   EXPECT_EQ(pointer_events[0].scroll_delta_y, 53 * 2.0);
 }
 
+// A zero-delta smooth scroll (e.g. a GDK smooth-scroll boundary event on a
+// non-touchpad device) is a no-op and must not synthesize a pointer event: it
+// would be sent as a kMove with no scroll signal and no button — a move on a
+// pointer that was never pressed — which the pointer-data converter rejects.
+TEST(FlScrollingManagerTest, DiscreteScrollingZeroDelta) {
+  g_autoptr(FlDartProject) project = fl_dart_project_new();
+  g_autoptr(FlEngine) engine = fl_engine_new(project);
+
+  g_autoptr(GError) error = nullptr;
+  EXPECT_TRUE(fl_engine_start(engine, &error));
+  EXPECT_EQ(error, nullptr);
+
+  std::vector<FlutterPointerEvent> pointer_events;
+  fl_engine_get_embedder_api(engine)->SendPointerEvent = MOCK_ENGINE_PROC(
+      SendPointerEvent,
+      ([&pointer_events](auto engine, const FlutterPointerEvent* events,
+                         size_t events_count) {
+        for (size_t i = 0; i < events_count; i++) {
+          pointer_events.push_back(events[i]);
+        }
+
+        return kSuccess;
+      }));
+
+  g_autoptr(FlScrollingManager) manager = fl_scrolling_manager_new(engine, 0);
+
+  GdkDevice* mouse =
+      GDK_DEVICE(g_object_new(gdk_wayland_device_get_type(), "input-source",
+                              GDK_SOURCE_MOUSE, nullptr));
+  GdkEventScroll* event =
+      reinterpret_cast<GdkEventScroll*>(gdk_event_new(GDK_SCROLL));
+  event->time = 1;
+  event->x = 4.0;
+  event->y = 8.0;
+  event->delta_x = 0.0;
+  event->delta_y = 0.0;
+  event->device = mouse;
+  event->direction = GDK_SCROLL_SMOOTH;
+  fl_scrolling_manager_handle_scroll_event(manager, event, 1.0);
+  EXPECT_EQ(pointer_events.size(), 0u);
+}
+
 TEST(FlScrollingManagerTest, Panning) {
   g_autoptr(FlDartProject) project = fl_dart_project_new();
   g_autoptr(FlEngine) engine = fl_engine_new(project);
