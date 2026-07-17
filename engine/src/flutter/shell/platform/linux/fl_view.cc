@@ -12,6 +12,7 @@
 
 #include "flutter/common/constants.h"
 #include "flutter/shell/platform/linux/fl_accessible_node.h"
+#include "flutter/shell/platform/linux/fl_compositor_hdr.h"
 #include "flutter/shell/platform/linux/fl_compositor_opengl.h"
 #include "flutter/shell/platform/linux/fl_compositor_software.h"
 #include "flutter/shell/platform/linux/fl_engine_private.h"
@@ -451,6 +452,23 @@ static void setup_opengl(FlView* self) {
   // then we have to copy the texture via the CPU.
   gboolean shareable =
       GDK_IS_WAYLAND_DISPLAY(gtk_widget_get_display(GTK_WIDGET(self)));
+
+  // OLYM Phase-6 Linux HDR: on Wayland, present via an engine-owned
+  // wl_subsurface (GPU-resident dma-buf). fl_compositor_hdr_new returns NULL if
+  // the session isn't Wayland or the required globals are missing, in which
+  // case we fall back to the OpenGL/GDK compositor (X11 / no-CM path untouched).
+  if (shareable) {
+    FlCompositorHDR* hdr = fl_compositor_hdr_new(
+        fl_engine_get_task_runner(self->engine),
+        fl_engine_get_opengl_manager(self->engine),
+        GTK_WIDGET(self->render_area));
+    if (hdr != nullptr) {
+      self->compositor = FL_COMPOSITOR(hdr);
+      return;
+    }
+    g_warning("olym-hdr: FlCompositorHDR unavailable; using FlCompositorOpenGL");
+  }
+
   self->compositor = FL_COMPOSITOR(fl_compositor_opengl_new(
       fl_engine_get_task_runner(self->engine),
       fl_engine_get_opengl_manager(self->engine), shareable));
