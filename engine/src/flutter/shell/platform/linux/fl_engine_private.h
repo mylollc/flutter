@@ -82,6 +82,17 @@ FlutterRendererType fl_engine_get_renderer_type(FlEngine* engine);
 FlOpenGLManager* fl_engine_get_opengl_manager(FlEngine* engine);
 
 /**
+ * fl_engine_set_f16_backing_stores:
+ * @engine: an #FlEngine.
+ * @enable: %TRUE to allocate OpenGL backing stores as GL_RGBA16F.
+ *
+ * OLYM Linux HDR: switches new OpenGL backing stores to F16 (linear scRGB
+ * Skia surfaces). Called by #FlView when it selects the HDR compositor,
+ * before the first frame is rendered.
+ */
+void fl_engine_set_f16_backing_stores(FlEngine* engine, gboolean enable);
+
+/**
  * fl_engine_get_display_monitor:
  * @engine: an #FlEngine.
  *

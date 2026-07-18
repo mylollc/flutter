@@ -88,6 +88,21 @@ int64_t fl_view_get_id(FlView* view);
  */
 void fl_view_set_background_color(FlView* view, const GdkRGBA* color);
 
+/**
+ * fl_view_get_display_headroom:
+ * @view: an #FlView.
+ *
+ * Gets the current EDR headroom of the display the view is on: the output's
+ * maximum luminance divided by its reference (SDR white) luminance, read live
+ * from the Wayland color-management protocol. 1.0 when the display (or the
+ * session's presentation path) is SDR-only. Plugins rendering HDR content can
+ * poll this to drive tone mapping — the Linux analog of macOS's
+ * NSScreen.maximumExtendedDynamicRangeColorComponentValue. Thread-safe.
+ *
+ * Returns: the headroom multiplier (>= 1.0).
+ */
+double fl_view_get_display_headroom(FlView* view);
+
 G_END_DECLS
 
 #endif  // FLUTTER_SHELL_PLATFORM_LINUX_PUBLIC_FLUTTER_LINUX_FL_VIEW_H_

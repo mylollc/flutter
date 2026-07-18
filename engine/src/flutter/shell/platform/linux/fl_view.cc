@@ -456,17 +456,24 @@ static void setup_opengl(FlView* self) {
   // OLYM Phase-6 Linux HDR: on Wayland, present via an engine-owned
   // wl_subsurface (GPU-resident dma-buf). fl_compositor_hdr_new returns NULL if
   // the session isn't Wayland or the required globals are missing, in which
-  // case we fall back to the OpenGL/GDK compositor (X11 / no-CM path untouched).
+  // case we fall back to the OpenGL/GDK compositor (X11 / no-CM path
+  // untouched).
   if (shareable) {
-    FlCompositorHDR* hdr = fl_compositor_hdr_new(
-        fl_engine_get_task_runner(self->engine),
-        fl_engine_get_opengl_manager(self->engine),
-        GTK_WIDGET(self->render_area));
+    FlCompositorHDR* hdr =
+        fl_compositor_hdr_new(fl_engine_get_task_runner(self->engine),
+                              fl_engine_get_opengl_manager(self->engine),
+                              GTK_WIDGET(self->render_area));
     if (hdr != nullptr) {
       self->compositor = FL_COMPOSITOR(hdr);
+      // F16 end-to-end: Skia composites into linear-scRGB F16 backing stores
+      // (1.0 = SDR white, HDR highlights above), which the HDR compositor
+      // scales by reference/max luminance and presents on the extended-linear
+      // tagged subsurface.
+      fl_engine_set_f16_backing_stores(self->engine, TRUE);
       return;
     }
-    g_warning("olym-hdr: FlCompositorHDR unavailable; using FlCompositorOpenGL");
+    g_warning(
+        "olym-hdr: FlCompositorHDR unavailable; using FlCompositorOpenGL");
   }
 
   self->compositor = FL_COMPOSITOR(fl_compositor_opengl_new(
@@ -821,6 +828,15 @@ G_MODULE_EXPORT void fl_view_set_background_color(FlView* self,
   g_return_if_fail(FL_IS_VIEW(self));
   gdk_rgba_free(self->background_color);
   self->background_color = gdk_rgba_copy(color);
+}
+
+G_MODULE_EXPORT double fl_view_get_display_headroom(FlView* self) {
+  g_return_val_if_fail(FL_IS_VIEW(self), 1.0);
+  if (self->compositor != nullptr && FL_IS_COMPOSITOR_HDR(self->compositor)) {
+    return fl_compositor_hdr_get_display_headroom(
+        FL_COMPOSITOR_HDR(self->compositor));
+  }
+  return 1.0;  // SDR presentation path (X11 / no color management)
 }
 
 FlViewAccessible* fl_view_get_accessible(FlView* self) {

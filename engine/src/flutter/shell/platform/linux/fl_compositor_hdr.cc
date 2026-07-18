@@ -15,14 +15,16 @@
 #include <wayland-client.h>
 
 #include "flutter/shell/platform/linux/fl_framebuffer.h"
+#include "flutter/shell/platform/linux/wayland_vendor/color-management-v1-client-protocol.h"
 #include "flutter/shell/platform/linux/wayland_vendor/linux-dmabuf-v1-client-protocol.h"
 #include "flutter/shell/platform/linux/wayland_vendor/viewporter-client-protocol.h"
 
 // DRM fourccs (avoid a libdrm include; these are the stable fourcc codes).
-#define OLYM_FOURCC(a, b, c, d)                                    \
+#define OLYM_FOURCC(a, b, c, d)                                   \
   ((uint32_t)(a) | ((uint32_t)(b) << 8) | ((uint32_t)(c) << 16) | \
    ((uint32_t)(d) << 24))
-#define OLYM_DRM_FORMAT_ABGR8888 OLYM_FOURCC('A', 'B', '2', '4')
+// [16:16:16:16] R:G:B:A little-endian, IEEE half-float per channel.
+#define OLYM_DRM_FORMAT_ABGR16161616F OLYM_FOURCC('A', 'B', '4', 'H')
 
 // EGL device-query tokens (define defensively; the bullseye sysroot's eglext.h
 // predates EGL_EXT_device_drm_render_node).
@@ -36,17 +38,16 @@
 #define EGL_DEVICE_EXT 0x322C
 #endif
 
-// Present ring depth. MUST stay at 2 on this stack: iris/Arrow-Lake silently
-// stops honoring glBlitFramebuffer into the 3rd+ concurrent LINEAR dma-buf
-// render target (GL reports success, but the write never reaches memory —
-// glClear into the same FBO DOES land, so it is a blit-path limit, not the
-// target). With Flutter's own shareable backing-store FBOs also live, only our
-// first two ring slots ever receive blits; a 3rd slot would show stale content
-// (the loading-screen flicker). Two slots = classic double-buffer; under
-// compositor backpressure a frame is dropped (repeats the last good frame),
-// never blanked. Deeper buffering needs a shader-draw present path (draws land
-// where blits don't) — that is also what HDR step 3 tone-mapping requires.
-#define HDR_RING 2
+// Present ring depth. Was pinned to 2 while the present was a
+// glBlitFramebuffer: iris/Arrow-Lake silently stopped honoring blits into the
+// 3rd+ concurrent LINEAR dma-buf render target (GL reported success, memory
+// stayed unwritten; glClear into the same FBO landed — a blit-path limit, not
+// the target). The present is now a shader draw, which is expected to land
+// where blits didn't (as glClear does). If the loading-screen stale-slot
+// flicker ever reappears, the draw path did NOT lift the limit — drop this
+// back to 2 and investigate (Mesa-iris bug vs our EGLImage/FBO setup is still
+// an open question, see docs/platform/LINUX_VULKAN_HDR_PLAN.md).
+#define HDR_RING 3
 
 // A single dma-buf slot: a GBM bo rendered into via an EGLImage-backed FBO, and
 // presented as the same bo's wl_buffer. Heap-allocated so it survives a resize
@@ -64,6 +65,17 @@ typedef struct _HdrBuffer {
   gboolean retired;  // dropped from the ring on resize; free on release
 } HdrBuffer;
 
+// One wl_output we bound (with its color-management extension object). The
+// compositor references one of these in wl_surface.enter, and each one emits
+// image_description_changed when its color state (HDR on/off, SDR-brightness
+// slider, profile) changes.
+typedef struct _HdrOutput {
+  struct _FlCompositorHDR* owner;
+  uint32_t global_name;  // wl_registry name, for global_remove matching
+  struct wl_output* output;
+  struct wp_color_management_output_v1* cm_output;
+} HdrOutput;
+
 struct _FlCompositorHDR {
   FlCompositor parent_instance;
 
@@ -74,6 +86,7 @@ struct _FlCompositorHDR {
   // Wayland — created on the main thread at construction.
   struct wl_display* display;
   struct wl_event_queue* queue;
+  struct wl_registry* registry;  // kept alive for output hotplug
   struct wl_compositor* comp;
   struct wl_subcompositor* subcomp;
   struct zwp_linux_dmabuf_v1* dmabuf;
@@ -85,25 +98,84 @@ struct _FlCompositorHDR {
   gboolean wl_ok;
   gboolean disposed;
 
+  // Color management (wp_color_manager_v1). All CM state below is owned by
+  // the thread draining `queue`: the main thread during hdr_setup (blocking
+  // roundtrips), the raster thread afterwards (present_layers drains) — never
+  // both concurrently, so it needs no lock.
+  struct wp_color_manager_v1* cm;
+  struct wp_color_management_surface_v1* cm_surface;
+  GPtrArray* outputs;         // HdrOutput*
+  HdrOutput* current_output;  // output the surface is on (default: first)
+
+  // Advertised manager capabilities we require.
+  gboolean cap_parametric;
+  gboolean cap_set_luminances;
+  gboolean cap_ext_linear;
+  gboolean cap_srgb_primaries;
+  gboolean cap_perceptual;
+
+  // Live luminances of the current output's image description.
+  // KWin anchors extended-linear electrical 1.0 at max_lum (clamping above),
+  // NOT at reference_lum — so Skia's linear 1.0 = SDR-white frames must be
+  // scaled by reference/max at present time to land SDR white on the desktop
+  // white and give highlights the (max/reference) headroom above it.
+  uint32_t out_min_lum;  // units of 0.0001 cd/m2 (protocol encoding)
+  uint32_t out_max_lum;  // cd/m2
+  uint32_t out_ref_lum;  // cd/m2
+  float present_scale;   // reference/max; 1.0 until known
+
+  // max/reference in thousandths, read cross-thread (plugins poll it via
+  // fl_view_get_display_headroom to drive HDR tone mapping) — hence atomic.
+  gint headroom_milli;
+
+  // In-flight read of the current output's image description (a get_
+  // image_description → ready → get_information → …events… → done chain,
+  // advanced by queue dispatch — blocking at setup, per-frame drains after).
+  struct wp_image_description_v1* pending_desc;
+  struct wp_image_description_info_v1* pending_info;
+  uint32_t pend_min_lum, pend_max_lum, pend_ref_lum;
+  gboolean pend_lum_got;
+  gboolean reread_needed;  // change arrived while a read was in flight
+
+  // The surface's own image description (extended-linear at the output's
+  // luminances). Recreated whenever the output luminances change;
+  // `surface_desc_pending` is awaiting its ready event.
+  struct wp_image_description_v1* surface_desc;
+  struct wp_image_description_v1* surface_desc_pending;
+
+  // Present-shader objects (raster thread, lazily created).
+  GLuint program;
+  GLint scale_location;
+  GLuint vertex_buffer;
+  gboolean program_failed;  // compile/link failed; fall back to blit
+
   struct gbm_device* gbm;
   int drm_fd;
 
   // Ring lives entirely on the raster thread (present_layers, its queue-drain
-  // release handling, and the retired sweep). render() commits the pending slot.
+  // release handling, and the retired sweep). render() commits the pending
+  // slot.
   HdrBuffer* ring[HDR_RING];
   GList* retired;  // HdrBuffer* awaiting release after a resize
   size_t ring_w, ring_h;
 
-  // Present handoff. present_layers (raster) does the GL blit into a ring slot
-  // and publishes `pending_slot`; render() (main thread) does the Wayland
+  // Present handoff. present_layers (raster) draws into a ring slot and
+  // publishes `pending_slot`; render() (main thread) does the Wayland
   // attach/commit of that slot 1:1 with the parent surface's commit, so the two
   // surfaces latch atomically. `busy` is written by render() (commit) and the
   // release callback, read by present_layers (slot pick) — all under `mutex`.
   GMutex mutex;
-  int pending_slot;  // -1 = nothing waiting; else ring index blitted & ready
+  int pending_slot;  // -1 = nothing waiting; else ring index drawn & ready
 };
 
 G_DEFINE_TYPE(FlCompositorHDR, fl_compositor_hdr, fl_compositor_get_type())
+
+static void hdr_start_output_read(FlCompositorHDR* self);
+static void hdr_retag_surface(FlCompositorHDR* self);
+static void hdr_output_add(FlCompositorHDR* self,
+                           uint32_t name,
+                           struct wl_output* output);
+static void hdr_output_free(gpointer data);
 
 // ---------------------------------------------------------------------------
 // registry
@@ -127,11 +199,45 @@ static void registry_global(void* data,
   } else if (strcmp(iface, "wp_viewporter") == 0) {
     self->viewporter = static_cast<struct wp_viewporter*>(
         wl_registry_bind(reg, name, &wp_viewporter_interface, 1));
+  } else if (strcmp(iface, "wp_color_manager_v1") == 0) {
+    self->cm = static_cast<struct wp_color_manager_v1*>(
+        wl_registry_bind(reg, name, &wp_color_manager_v1_interface, 1));
+  } else if (strcmp(iface, "wl_output") == 0) {
+    uint32_t v = version < 2 ? version : 2;
+    struct wl_output* output = static_cast<struct wl_output*>(
+        wl_registry_bind(reg, name, &wl_output_interface, v));
+    hdr_output_add(self, name, output);
   }
 }
+
+// Output unplugged (dock/monitor hotplug). Dispatched on whichever thread
+// drains the queue (raster, post-setup).
 static void registry_global_remove(void* data,
                                    struct wl_registry* reg,
-                                   uint32_t name) {}
+                                   uint32_t name) {
+  FlCompositorHDR* self = FL_COMPOSITOR_HDR(data);
+  if (self->outputs == nullptr) {
+    return;
+  }
+  for (guint i = 0; i < self->outputs->len; i++) {
+    HdrOutput* o = static_cast<HdrOutput*>(g_ptr_array_index(self->outputs, i));
+    if (o->global_name != name) {
+      continue;
+    }
+    gboolean was_current = (self->current_output == o);
+    g_ptr_array_remove_index(self->outputs, i);  // frees via hdr_output_free
+    if (was_current) {
+      self->current_output =
+          self->outputs->len > 0
+              ? static_cast<HdrOutput*>(g_ptr_array_index(self->outputs, 0))
+              : nullptr;
+      if (self->current_output != nullptr) {
+        hdr_start_output_read(self);
+      }
+    }
+    return;
+  }
+}
 static const struct wl_registry_listener registry_listener = {
     registry_global, registry_global_remove};
 
@@ -143,6 +249,342 @@ static void dmabuf_modifier(void* d,
                             uint32_t lo) {}
 static const struct zwp_linux_dmabuf_v1_listener dmabuf_listener = {
     dmabuf_format, dmabuf_modifier};
+
+// ---------------------------------------------------------------------------
+// wp_color_manager_v1 capability events
+// ---------------------------------------------------------------------------
+static void cm_supported_intent(void* data,
+                                struct wp_color_manager_v1* cm,
+                                uint32_t render_intent) {
+  FlCompositorHDR* self = FL_COMPOSITOR_HDR(data);
+  if (render_intent == WP_COLOR_MANAGER_V1_RENDER_INTENT_PERCEPTUAL) {
+    self->cap_perceptual = TRUE;
+  }
+}
+static void cm_supported_feature(void* data,
+                                 struct wp_color_manager_v1* cm,
+                                 uint32_t feature) {
+  FlCompositorHDR* self = FL_COMPOSITOR_HDR(data);
+  if (feature == WP_COLOR_MANAGER_V1_FEATURE_PARAMETRIC) {
+    self->cap_parametric = TRUE;
+  }
+  if (feature == WP_COLOR_MANAGER_V1_FEATURE_SET_LUMINANCES) {
+    self->cap_set_luminances = TRUE;
+  }
+}
+static void cm_supported_tf_named(void* data,
+                                  struct wp_color_manager_v1* cm,
+                                  uint32_t tf) {
+  FlCompositorHDR* self = FL_COMPOSITOR_HDR(data);
+  if (tf == WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_EXT_LINEAR) {
+    self->cap_ext_linear = TRUE;
+  }
+}
+static void cm_supported_primaries_named(void* data,
+                                         struct wp_color_manager_v1* cm,
+                                         uint32_t primaries) {
+  FlCompositorHDR* self = FL_COMPOSITOR_HDR(data);
+  if (primaries == WP_COLOR_MANAGER_V1_PRIMARIES_SRGB) {
+    self->cap_srgb_primaries = TRUE;
+  }
+}
+static void cm_done(void* data, struct wp_color_manager_v1* cm) {}
+static const struct wp_color_manager_v1_listener cm_listener = {
+    cm_supported_intent, cm_supported_feature, cm_supported_tf_named,
+    cm_supported_primaries_named, cm_done};
+
+// ---------------------------------------------------------------------------
+// image-description events. One listener serves both in-flight objects; the
+// object pointer routes: `pending_desc` is an output description being read,
+// `surface_desc_pending` is our own extended-linear description awaiting
+// ready before it can be set on the surface.
+// ---------------------------------------------------------------------------
+static void info_done(void* data, struct wp_image_description_info_v1* info);
+static void info_icc_file(void* data,
+                          struct wp_image_description_info_v1* info,
+                          int32_t fd,
+                          uint32_t size) {
+  if (fd >= 0) {
+    close(fd);
+  }
+}
+static void info_primaries(void* data,
+                           struct wp_image_description_info_v1* info,
+                           int32_t rx,
+                           int32_t ry,
+                           int32_t gx,
+                           int32_t gy,
+                           int32_t bx,
+                           int32_t by,
+                           int32_t wx,
+                           int32_t wy) {}
+static void info_primaries_named(void* data,
+                                 struct wp_image_description_info_v1* info,
+                                 uint32_t primaries) {}
+static void info_tf_power(void* data,
+                          struct wp_image_description_info_v1* info,
+                          uint32_t eexp) {}
+static void info_tf_named(void* data,
+                          struct wp_image_description_info_v1* info,
+                          uint32_t tf) {}
+static void info_luminances(void* data,
+                            struct wp_image_description_info_v1* info,
+                            uint32_t min_lum,
+                            uint32_t max_lum,
+                            uint32_t reference_lum) {
+  FlCompositorHDR* self = FL_COMPOSITOR_HDR(data);
+  self->pend_min_lum = min_lum;
+  self->pend_max_lum = max_lum;
+  self->pend_ref_lum = reference_lum;
+  self->pend_lum_got = TRUE;
+}
+static void info_target_primaries(void* data,
+                                  struct wp_image_description_info_v1* info,
+                                  int32_t rx,
+                                  int32_t ry,
+                                  int32_t gx,
+                                  int32_t gy,
+                                  int32_t bx,
+                                  int32_t by,
+                                  int32_t wx,
+                                  int32_t wy) {}
+static void info_target_luminance(void* data,
+                                  struct wp_image_description_info_v1* info,
+                                  uint32_t min_lum,
+                                  uint32_t max_lum) {}
+static void info_target_max_cll(void* data,
+                                struct wp_image_description_info_v1* info,
+                                uint32_t max_cll) {}
+static void info_target_max_fall(void* data,
+                                 struct wp_image_description_info_v1* info,
+                                 uint32_t max_fall) {}
+static const struct wp_image_description_info_v1_listener info_listener = {
+    info_done,
+    info_icc_file,
+    info_primaries,
+    info_primaries_named,
+    info_tf_power,
+    info_tf_named,
+    info_luminances,
+    info_target_primaries,
+    info_target_luminance,
+    info_target_max_cll,
+    info_target_max_fall};
+
+static void desc_failed(void* data,
+                        struct wp_image_description_v1* desc,
+                        uint32_t cause,
+                        const char* msg) {
+  FlCompositorHDR* self = FL_COMPOSITOR_HDR(data);
+  g_warning("FlCompositorHDR: image description failed (cause=%u): %s", cause,
+            msg != nullptr ? msg : "");
+  if (desc == self->pending_desc) {
+    wp_image_description_v1_destroy(self->pending_desc);
+    self->pending_desc = nullptr;
+    if (self->reread_needed) {
+      self->reread_needed = FALSE;
+      hdr_start_output_read(self);
+    }
+  } else if (desc == self->surface_desc_pending) {
+    wp_image_description_v1_destroy(self->surface_desc_pending);
+    self->surface_desc_pending = nullptr;
+  }
+}
+static void desc_ready(void* data,
+                       struct wp_image_description_v1* desc,
+                       uint32_t identity) {
+  FlCompositorHDR* self = FL_COMPOSITOR_HDR(data);
+  if (desc == self->pending_desc) {
+    // Output description ready: ask for its parameters.
+    self->pend_min_lum = self->pend_max_lum = self->pend_ref_lum = 0;
+    self->pend_lum_got = FALSE;
+    self->pending_info = wp_image_description_v1_get_information(desc);
+    wp_image_description_info_v1_add_listener(self->pending_info,
+                                              &info_listener, self);
+  } else if (desc == self->surface_desc_pending) {
+    // Our extended-linear description is usable: apply it. It becomes the
+    // surface's committed state at the next render() commit.
+    wp_color_management_surface_v1_set_image_description(
+        self->cm_surface, desc, WP_COLOR_MANAGER_V1_RENDER_INTENT_PERCEPTUAL);
+    if (self->surface_desc != nullptr) {
+      wp_image_description_v1_destroy(self->surface_desc);
+    }
+    self->surface_desc = desc;
+    self->surface_desc_pending = nullptr;
+  }
+}
+static void desc_ready2(void* data,
+                        struct wp_image_description_v1* desc,
+                        uint32_t identity_hi,
+                        uint32_t identity_lo) {
+  desc_ready(data, desc, identity_lo);
+}
+static const struct wp_image_description_v1_listener desc_listener = {
+    desc_failed, desc_ready, desc_ready2};
+
+// End of an output-description read: adopt the values, rescale, retag.
+static void info_done(void* data, struct wp_image_description_info_v1* info) {
+  FlCompositorHDR* self = FL_COMPOSITOR_HDR(data);
+  if (info != self->pending_info) {
+    return;
+  }
+  wp_image_description_info_v1_destroy(self->pending_info);
+  self->pending_info = nullptr;
+  if (self->pending_desc != nullptr) {
+    wp_image_description_v1_destroy(self->pending_desc);
+    self->pending_desc = nullptr;
+  }
+
+  if (self->pend_lum_got && self->pend_max_lum > 0 && self->pend_ref_lum > 0) {
+    gboolean changed = self->pend_min_lum != self->out_min_lum ||
+                       self->pend_max_lum != self->out_max_lum ||
+                       self->pend_ref_lum != self->out_ref_lum;
+    self->out_min_lum = self->pend_min_lum;
+    self->out_max_lum = self->pend_max_lum;
+    self->out_ref_lum = self->pend_ref_lum;
+    self->present_scale = (float)self->out_ref_lum / (float)self->out_max_lum;
+    g_atomic_int_set(&self->headroom_milli,
+                     (gint)((1000.0 * self->out_max_lum) / self->out_ref_lum));
+    if (changed) {
+      g_message(
+          "FlCompositorHDR: output luminances min=%.4f max=%u ref=%u cd/m2 "
+          "(headroom %.2fx, present scale %.4f)",
+          self->out_min_lum / 1e4, self->out_max_lum, self->out_ref_lum,
+          (double)self->out_max_lum / self->out_ref_lum, self->present_scale);
+      hdr_retag_surface(self);
+    }
+  } else {
+    g_warning(
+        "FlCompositorHDR: output image description carried no luminances; "
+        "keeping previous values (scale %.4f)",
+        self->present_scale);
+  }
+
+  if (self->reread_needed) {
+    self->reread_needed = FALSE;
+    hdr_start_output_read(self);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// output color state
+// ---------------------------------------------------------------------------
+static void cm_output_changed(void* data,
+                              struct wp_color_management_output_v1* cm_output) {
+  HdrOutput* o = static_cast<HdrOutput*>(data);
+  FlCompositorHDR* self = o->owner;
+  // Only the output the surface is on drives the scale/tag. (KWin re-emits
+  // this when HDR is toggled or the SDR-brightness slider moves.)
+  if (self->current_output == o) {
+    hdr_start_output_read(self);
+  }
+}
+static const struct wp_color_management_output_v1_listener cm_output_listener =
+    {cm_output_changed};
+
+static void hdr_output_free(gpointer data) {
+  HdrOutput* o = static_cast<HdrOutput*>(data);
+  if (o->cm_output != nullptr) {
+    wp_color_management_output_v1_destroy(o->cm_output);
+  }
+  if (o->output != nullptr) {
+    wl_output_destroy(o->output);
+  }
+  free(o);
+}
+
+static void hdr_output_add(FlCompositorHDR* self,
+                           uint32_t name,
+                           struct wl_output* output) {
+  HdrOutput* o = static_cast<HdrOutput*>(calloc(1, sizeof(HdrOutput)));
+  o->owner = self;
+  o->global_name = name;
+  o->output = output;
+  // During the initial registry roundtrip `cm` may not be bound yet (global
+  // order is arbitrary); hdr_setup fills cm_output in afterwards. For hotplug
+  // (post-setup) cm is available immediately.
+  if (self->cm != nullptr) {
+    o->cm_output = wp_color_manager_v1_get_output(self->cm, output);
+    wp_color_management_output_v1_add_listener(o->cm_output,
+                                               &cm_output_listener, o);
+  }
+  g_ptr_array_add(self->outputs, o);
+  if (self->current_output == nullptr) {
+    self->current_output = o;
+  }
+}
+
+// Begin (or queue) a read of the current output's image description.
+static void hdr_start_output_read(FlCompositorHDR* self) {
+  if (self->current_output == nullptr ||
+      self->current_output->cm_output == nullptr) {
+    return;
+  }
+  if (self->pending_desc != nullptr || self->pending_info != nullptr) {
+    self->reread_needed = TRUE;
+    return;
+  }
+  self->pending_desc = wp_color_management_output_v1_get_image_description(
+      self->current_output->cm_output);
+  wp_image_description_v1_add_listener(self->pending_desc, &desc_listener,
+                                       self);
+}
+
+// (Re)create the surface's extended-linear image description at the current
+// output luminances. Applied asynchronously when its ready event arrives.
+static void hdr_retag_surface(FlCompositorHDR* self) {
+  if (self->cm_surface == nullptr || self->out_max_lum == 0 ||
+      self->out_ref_lum == 0) {
+    return;
+  }
+  if (self->surface_desc_pending != nullptr) {
+    // A retag is already in flight; the newest luminances will win because
+    // info_done calls us again only on change — drop the stale attempt.
+    wp_image_description_v1_destroy(self->surface_desc_pending);
+    self->surface_desc_pending = nullptr;
+  }
+  struct wp_image_description_creator_params_v1* creator =
+      wp_color_manager_v1_create_parametric_creator(self->cm);
+  wp_image_description_creator_params_v1_set_tf_named(
+      creator, WP_COLOR_MANAGER_V1_TRANSFER_FUNCTION_EXT_LINEAR);
+  wp_image_description_creator_params_v1_set_primaries_named(
+      creator, WP_COLOR_MANAGER_V1_PRIMARIES_SRGB);
+  // min_lum is in 0.0001 cd/m2 units; max/reference in cd/m2. Declare the
+  // output's own volume: we pre-scale pixels by reference/max, so our content
+  // exactly fills [0, max] with SDR white at reference.
+  wp_image_description_creator_params_v1_set_luminances(
+      creator, self->out_min_lum, self->out_max_lum, self->out_ref_lum);
+  self->surface_desc_pending =
+      wp_image_description_creator_params_v1_create(creator);
+  wp_image_description_v1_add_listener(self->surface_desc_pending,
+                                       &desc_listener, self);
+}
+
+// ---------------------------------------------------------------------------
+// wl_surface enter/leave — which output is the window on? The compositor
+// sends enter per bound wl_output object; only references to OUR bindings
+// match (GDK's bindings for the same globals are ignored).
+// ---------------------------------------------------------------------------
+static void surface_enter(void* data,
+                          struct wl_surface* surface,
+                          struct wl_output* output) {
+  FlCompositorHDR* self = FL_COMPOSITOR_HDR(data);
+  for (guint i = 0; i < self->outputs->len; i++) {
+    HdrOutput* o = static_cast<HdrOutput*>(g_ptr_array_index(self->outputs, i));
+    if (o->output == output) {
+      if (self->current_output != o) {
+        self->current_output = o;
+        hdr_start_output_read(self);
+      }
+      return;
+    }
+  }
+}
+static void surface_leave(void* data,
+                          struct wl_surface* surface,
+                          struct wl_output* output) {}
+static const struct wl_surface_listener surface_listener = {surface_enter,
+                                                            surface_leave};
 
 // ---------------------------------------------------------------------------
 // buffer lifecycle
@@ -207,10 +649,10 @@ static HdrBuffer* hdr_buffer_new(FlCompositorHDR* self, size_t w, size_t h) {
   b->w = w;
   b->h = h;
 
-  b->bo = gbm_bo_create(self->gbm, w, h, OLYM_DRM_FORMAT_ABGR8888,
+  b->bo = gbm_bo_create(self->gbm, w, h, OLYM_DRM_FORMAT_ABGR16161616F,
                         GBM_BO_USE_LINEAR | GBM_BO_USE_RENDERING);
   if (!b->bo) {
-    g_warning("FlCompositorHDR: gbm_bo_create %zux%zu failed", w, h);
+    g_warning("FlCompositorHDR: gbm_bo_create %zux%zu (F16) failed", w, h);
     hdr_buffer_free(b);
     return nullptr;
   }
@@ -224,7 +666,7 @@ static HdrBuffer* hdr_buffer_new(FlCompositorHDR* self, size_t w, size_t h) {
                     EGL_HEIGHT,
                     (EGLint)h,
                     EGL_LINUX_DRM_FOURCC_EXT,
-                    (EGLint)OLYM_DRM_FORMAT_ABGR8888,
+                    (EGLint)OLYM_DRM_FORMAT_ABGR16161616F,
                     EGL_DMA_BUF_PLANE0_FD_EXT,
                     fd_egl,
                     EGL_DMA_BUF_PLANE0_OFFSET_EXT,
@@ -236,7 +678,7 @@ static HdrBuffer* hdr_buffer_new(FlCompositorHDR* self, size_t w, size_t h) {
                                (EGLClientBuffer)NULL, attrs);
   close(fd_egl);
   if (b->image == EGL_NO_IMAGE_KHR) {
-    g_warning("FlCompositorHDR: eglCreateImageKHR failed egl=0x%x",
+    g_warning("FlCompositorHDR: eglCreateImageKHR (F16) failed egl=0x%x",
               eglGetError());
     hdr_buffer_free(b);
     return nullptr;
@@ -256,7 +698,7 @@ static HdrBuffer* hdr_buffer_new(FlCompositorHDR* self, size_t w, size_t h) {
       glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
   glBindFramebuffer(GL_FRAMEBUFFER, 0);
   if (!complete) {
-    g_warning("FlCompositorHDR: dma-buf FBO incomplete");
+    g_warning("FlCompositorHDR: F16 dma-buf FBO incomplete");
     hdr_buffer_free(b);
     return nullptr;
   }
@@ -266,7 +708,7 @@ static HdrBuffer* hdr_buffer_new(FlCompositorHDR* self, size_t w, size_t h) {
       zwp_linux_dmabuf_v1_create_params(self->dmabuf);
   zwp_linux_buffer_params_v1_add(params, fd_wl, 0, offset, stride, 0, 0);
   b->buffer = zwp_linux_buffer_params_v1_create_immed(
-      params, w, h, OLYM_DRM_FORMAT_ABGR8888, 0);
+      params, w, h, OLYM_DRM_FORMAT_ABGR16161616F, 0);
   zwp_linux_buffer_params_v1_destroy(params);
   close(fd_wl);
   if (!b->buffer) {
@@ -295,8 +737,8 @@ static gboolean hdr_gbm_ensure(FlCompositorHDR* self) {
       node = eglQueryDeviceStringEXT((EGLDeviceEXT)dev,
                                      EGL_DRM_RENDER_NODE_FILE_EXT);
       if (!node) {
-        node = eglQueryDeviceStringEXT((EGLDeviceEXT)dev,
-                                       EGL_DRM_DEVICE_FILE_EXT);
+        node =
+            eglQueryDeviceStringEXT((EGLDeviceEXT)dev, EGL_DRM_DEVICE_FILE_EXT);
       }
     }
   }
@@ -362,7 +804,268 @@ static gboolean hdr_ring_ensure(FlCompositorHDR* self, size_t w, size_t h) {
 }
 
 // ---------------------------------------------------------------------------
-// FlCompositor::present_layers (raster thread) — blit the layer into a free
+// present shader — a fullscreen textured quad that Y-flips the backing store
+// into the slot FBO and applies the whole-surface reference/max scale.
+//
+// A draw (not glBlitFramebuffer) for two reasons: the scale must be applied
+// per-pixel to EVERY composited pixel (UI chrome included — KWin anchors
+// extended-linear 1.0 at max_lum for the whole surface, so unscaled white UI
+// would display at panel peak), and blits into the 3rd+ concurrent LINEAR
+// dma-buf render target silently no-op on iris/Arrow-Lake (the HDR_RING=2
+// workaround this path retires).
+// ---------------------------------------------------------------------------
+static const char* present_vertex_src =
+    "attribute vec2 position;\n"
+    "attribute vec2 in_texcoord;\n"
+    "varying vec2 texcoord;\n"
+    "\n"
+    "void main() {\n"
+    "  gl_Position = vec4(position, 0, 1);\n"
+    "  texcoord = in_texcoord;\n"
+    "}\n";
+
+static const char* present_fragment_src =
+    "#ifdef GL_ES\n"
+    "precision mediump float;\n"
+    "#endif\n"
+    "\n"
+    "uniform sampler2D texture;\n"
+    "uniform float out_scale;\n"
+    "varying vec2 texcoord;\n"
+    "\n"
+    "void main() {\n"
+    "  vec4 c = texture2D(texture, texcoord);\n"
+    "  gl_FragColor = vec4(c.rgb * out_scale, c.a);\n"
+    "}\n";
+
+static gchar* hdr_get_shader_log(GLuint shader) {
+  GLint log_length = 0;
+  glGetShaderiv(shader, GL_INFO_LOG_LENGTH, &log_length);
+  gchar* log = static_cast<gchar*>(g_malloc(log_length + 1));
+  glGetShaderInfoLog(shader, log_length, nullptr, log);
+  return log;
+}
+
+// Compile/link the present program (raster thread, GL context current).
+static gboolean hdr_program_ensure(FlCompositorHDR* self) {
+  if (self->program != 0) {
+    return TRUE;
+  }
+  if (self->program_failed) {
+    return FALSE;
+  }
+
+  GLuint vertex_shader = glCreateShader(GL_VERTEX_SHADER);
+  glShaderSource(vertex_shader, 1, &present_vertex_src, nullptr);
+  glCompileShader(vertex_shader);
+  GLint vertex_status = GL_FALSE;
+  glGetShaderiv(vertex_shader, GL_COMPILE_STATUS, &vertex_status);
+
+  GLuint fragment_shader = glCreateShader(GL_FRAGMENT_SHADER);
+  glShaderSource(fragment_shader, 1, &present_fragment_src, nullptr);
+  glCompileShader(fragment_shader);
+  GLint fragment_status = GL_FALSE;
+  glGetShaderiv(fragment_shader, GL_COMPILE_STATUS, &fragment_status);
+
+  GLuint program = 0;
+  GLint link_status = GL_FALSE;
+  if (vertex_status == GL_TRUE && fragment_status == GL_TRUE) {
+    program = glCreateProgram();
+    glAttachShader(program, vertex_shader);
+    glAttachShader(program, fragment_shader);
+    glLinkProgram(program);
+    glGetProgramiv(program, GL_LINK_STATUS, &link_status);
+  }
+
+  if (vertex_status != GL_TRUE) {
+    g_autofree gchar* log = hdr_get_shader_log(vertex_shader);
+    g_warning("FlCompositorHDR: vertex shader failed: %s", log);
+  }
+  if (fragment_status != GL_TRUE) {
+    g_autofree gchar* log = hdr_get_shader_log(fragment_shader);
+    g_warning("FlCompositorHDR: fragment shader failed: %s", log);
+  }
+  glDeleteShader(vertex_shader);
+  glDeleteShader(fragment_shader);
+  if (link_status != GL_TRUE) {
+    g_warning("FlCompositorHDR: present program failed to link");
+    if (program != 0) {
+      glDeleteProgram(program);
+    }
+    self->program_failed = TRUE;
+    return FALSE;
+  }
+
+  self->program = program;
+  self->scale_location = glGetUniformLocation(program, "out_scale");
+  GLint texture_location = glGetUniformLocation(program, "texture");
+
+  // Fullscreen quad (pos.xy, uv). The v coordinate is flipped relative to
+  // position so the bottom-left-origin GL backing store lands top-row-first
+  // in the dma-buf, which is what the Wayland buffer expects (same flip the
+  // previous glBlitFramebuffer(0,0,w,h -> 0,h,w,0) did).
+  GLfloat vertex_data[] = {
+      -1, -1, 0, 1, 1, 1,  1, 0, -1, 1, 0, 0,
+      -1, -1, 0, 1, 1, -1, 1, 1, 1,  1, 1, 0,
+  };
+  GLint saved_array_buffer = 0;
+  glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &saved_array_buffer);
+  glGenBuffers(1, &self->vertex_buffer);
+  glBindBuffer(GL_ARRAY_BUFFER, self->vertex_buffer);
+  glBufferData(GL_ARRAY_BUFFER, sizeof(vertex_data), vertex_data,
+               GL_STATIC_DRAW);
+  glBindBuffer(GL_ARRAY_BUFFER, saved_array_buffer);
+
+  GLint saved_program = 0;
+  glGetIntegerv(GL_CURRENT_PROGRAM, &saved_program);
+  glUseProgram(program);
+  glUniform1i(texture_location, 0);  // sampler on texture unit 0
+  glUseProgram(saved_program);
+  return TRUE;
+}
+
+// Draw the backing store into the slot FBO. present_layers runs in Skia's
+// raster GL context, so EVERY piece of state the draw touches is saved and
+// restored — Skia must see its context untouched. (The old blit only needed
+// scissor discipline; a draw is additionally subject to program, VAO, blend,
+// depth/stencil, cull, color mask, viewport, sampler and sRGB-encode state —
+// the comprehensive save/restore stock FlCompositorOpenGL uses, plus the
+// ones a draw adds over a blit.)
+static void hdr_present_draw(FlCompositorHDR* self,
+                             FlFramebuffer* src,
+                             HdrBuffer* dst,
+                             size_t w,
+                             size_t h) {
+  gboolean is_desktop_gl = epoxy_is_desktop_gl();
+
+  GLint saved_program = 0;
+  glGetIntegerv(GL_CURRENT_PROGRAM, &saved_program);
+  GLint saved_active_texture = 0;
+  glGetIntegerv(GL_ACTIVE_TEXTURE, &saved_active_texture);
+  glActiveTexture(GL_TEXTURE0);
+  GLint saved_texture_binding = 0;
+  glGetIntegerv(GL_TEXTURE_BINDING_2D, &saved_texture_binding);
+  GLint saved_sampler_binding = 0;
+  glGetIntegerv(GL_SAMPLER_BINDING, &saved_sampler_binding);
+  GLint saved_vao_binding = 0;
+  glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &saved_vao_binding);
+  GLint saved_array_buffer_binding = 0;
+  glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &saved_array_buffer_binding);
+  GLint saved_draw_framebuffer_binding = 0;
+  glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &saved_draw_framebuffer_binding);
+  GLint saved_read_framebuffer_binding = 0;
+  glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &saved_read_framebuffer_binding);
+  GLint saved_viewport[4] = {0, 0, 0, 0};
+  glGetIntegerv(GL_VIEWPORT, saved_viewport);
+  GLboolean saved_color_mask[4] = {GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE};
+  glGetBooleanv(GL_COLOR_WRITEMASK, saved_color_mask);
+  GLboolean saved_scissor_test = glIsEnabled(GL_SCISSOR_TEST);
+  GLboolean saved_blend = glIsEnabled(GL_BLEND);
+  GLboolean saved_cull_face = glIsEnabled(GL_CULL_FACE);
+  GLboolean saved_depth_test = glIsEnabled(GL_DEPTH_TEST);
+  GLboolean saved_stencil_test = glIsEnabled(GL_STENCIL_TEST);
+  GLboolean saved_framebuffer_srgb =
+      is_desktop_gl ? glIsEnabled(GL_FRAMEBUFFER_SRGB) : GL_FALSE;
+
+  glDisable(GL_SCISSOR_TEST);
+  glDisable(GL_BLEND);
+  glDisable(GL_CULL_FACE);
+  glDisable(GL_DEPTH_TEST);
+  glDisable(GL_STENCIL_TEST);
+  if (is_desktop_gl) {
+    // The dma-buf FBO is F16 (not an sRGB format), but leave nothing to
+    // chance: the values written must stay linear, un-encoded.
+    glDisable(GL_FRAMEBUFFER_SRGB);
+  }
+  glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+
+  glBindFramebuffer(GL_FRAMEBUFFER, dst->fbo);
+  glViewport(0, 0, w, h);
+
+  glUseProgram(self->program);
+  glUniform1f(self->scale_location, self->present_scale);
+
+  glBindSampler(0, 0);  // texture-object params (NEAREST), not a sampler's
+  glBindTexture(GL_TEXTURE_2D, fl_framebuffer_get_texture_id(src));
+
+  // Like stock FlCompositorOpenGL: VAOs can't be shared between contexts, so
+  // build a transient one per present.
+  GLuint vao = 0;
+  glGenVertexArrays(1, &vao);
+  glBindVertexArray(vao);
+  glBindBuffer(GL_ARRAY_BUFFER, self->vertex_buffer);
+  GLint position_location = glGetAttribLocation(self->program, "position");
+  glEnableVertexAttribArray(position_location);
+  glVertexAttribPointer(position_location, 2, GL_FLOAT, GL_FALSE,
+                        sizeof(GLfloat) * 4, 0);
+  GLint texcoord_location = glGetAttribLocation(self->program, "in_texcoord");
+  glEnableVertexAttribArray(texcoord_location);
+  glVertexAttribPointer(texcoord_location, 2, GL_FLOAT, GL_FALSE,
+                        sizeof(GLfloat) * 4,
+                        reinterpret_cast<void*>(sizeof(GLfloat) * 2));
+
+  glDrawArrays(GL_TRIANGLES, 0, 6);
+
+  glDeleteVertexArrays(1, &vao);
+
+  // Restore everything.
+  glBindBuffer(GL_ARRAY_BUFFER, saved_array_buffer_binding);
+  glBindVertexArray(saved_vao_binding);
+  glBindTexture(GL_TEXTURE_2D, saved_texture_binding);
+  glBindSampler(0, saved_sampler_binding);
+  glActiveTexture(saved_active_texture);
+  glUseProgram(saved_program);
+  glBindFramebuffer(GL_DRAW_FRAMEBUFFER, saved_draw_framebuffer_binding);
+  glBindFramebuffer(GL_READ_FRAMEBUFFER, saved_read_framebuffer_binding);
+  glViewport(saved_viewport[0], saved_viewport[1], saved_viewport[2],
+             saved_viewport[3]);
+  glColorMask(saved_color_mask[0], saved_color_mask[1], saved_color_mask[2],
+              saved_color_mask[3]);
+  if (saved_scissor_test) {
+    glEnable(GL_SCISSOR_TEST);
+  }
+  if (saved_blend) {
+    glEnable(GL_BLEND);
+  }
+  if (saved_cull_face) {
+    glEnable(GL_CULL_FACE);
+  }
+  if (saved_depth_test) {
+    glEnable(GL_DEPTH_TEST);
+  }
+  if (saved_stencil_test) {
+    glEnable(GL_STENCIL_TEST);
+  }
+  if (is_desktop_gl && saved_framebuffer_srgb) {
+    glEnable(GL_FRAMEBUFFER_SRGB);
+  }
+}
+
+// Last-resort present when the program failed to build: the step-2 blit
+// (correct pixels except the missing reference/max scale — visibly too
+// bright on an HDR output, but never blank). Scissor discipline per
+// flutter#140828.
+static void hdr_present_blit(FlFramebuffer* src,
+                             HdrBuffer* dst,
+                             size_t w,
+                             size_t h) {
+  GLint saved_read = 0, saved_draw = 0;
+  glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &saved_read);
+  glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &saved_draw);
+  glBindFramebuffer(GL_READ_FRAMEBUFFER, fl_framebuffer_get_id(src));
+  glBindFramebuffer(GL_DRAW_FRAMEBUFFER, dst->fbo);
+  GLboolean saved_scissor = glIsEnabled(GL_SCISSOR_TEST);
+  glDisable(GL_SCISSOR_TEST);
+  glBlitFramebuffer(0, 0, w, h, 0, h, w, 0, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+  if (saved_scissor) {
+    glEnable(GL_SCISSOR_TEST);
+  }
+  glBindFramebuffer(GL_READ_FRAMEBUFFER, saved_read);
+  glBindFramebuffer(GL_DRAW_FRAMEBUFFER, saved_draw);
+}
+
+// ---------------------------------------------------------------------------
+// FlCompositor::present_layers (raster thread) — draw the layer into a free
 // ring slot's dma-buf FBO and publish it as `pending_slot`; render() (main
 // thread) does the actual subsurface commit.
 // ---------------------------------------------------------------------------
@@ -390,7 +1093,9 @@ static gboolean fl_compositor_hdr_present_layers(FlCompositor* compositor,
   size_t w = layer->size.width;
   size_t h = layer->size.height;
 
-  wl_display_dispatch_queue_pending(self->display, self->queue);  // releases
+  // Drain buffer releases + color-management events (output luminance
+  // changes, surface enter, description ready) — all on our private queue.
+  wl_display_dispatch_queue_pending(self->display, self->queue);
   hdr_sweep_retired(self);
   if (!hdr_ring_ensure(self, w, h)) {
     return TRUE;
@@ -414,38 +1119,20 @@ static gboolean fl_compositor_hdr_present_layers(FlCompositor* compositor,
   }
   HdrBuffer* b = self->ring[slot];
 
-  // Composite: blit the backing store into the bo-backed FBO, flipping Y (GL
-  // origin is bottom-left; the Wayland buffer wants the top row first).
-  GLint saved_read = 0, saved_draw = 0;
-  glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &saved_read);
-  glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &saved_draw);
-  glBindFramebuffer(GL_READ_FRAMEBUFFER, fl_framebuffer_get_id(src));
-  glBindFramebuffer(GL_DRAW_FRAMEBUFFER, b->fbo);
-  // Skia hands off on the raster thread with GL_SCISSOR_TEST left ENABLED around
-  // its last clipped draw. glBlitFramebuffer is subject to the scissor test, so
-  // that leftover rectangle clips our present blit — only the scissored sub-rect
-  // of the slot gets the new frame and the rest keeps stale content. On the
-  // loading screen everything is drawn inside small ClipRRects => a small
-  // scissor => most of the slot is stale => the flicker (binary blink + the
-  // horizontal streaks at the scissor edges). Steady-state (full-viewport
-  // repaint) leaves scissor full/disabled, which is why it looked fine. Stock
-  // FlCompositorOpenGL disables scissor around its blit for the same reason
-  // (flutter#140828). Save/restore so Skia's state is untouched.
-  GLboolean saved_scissor = glIsEnabled(GL_SCISSOR_TEST);
-  glDisable(GL_SCISSOR_TEST);
-  glBlitFramebuffer(0, 0, w, h, 0, h, w, 0, GL_COLOR_BUFFER_BIT, GL_NEAREST);
-  if (saved_scissor) {
-    glEnable(GL_SCISSOR_TEST);
+  // Composite: draw the backing store into the bo-backed FBO (Y-flip +
+  // reference/max scale). Blit fallback only if the program can't build.
+  if (hdr_program_ensure(self)) {
+    hdr_present_draw(self, src, b, w, h);
+  } else {
+    hdr_present_blit(src, b, w, h);
   }
-  glBindFramebuffer(GL_READ_FRAMEBUFFER, saved_read);
-  glBindFramebuffer(GL_DRAW_FRAMEBUFFER, saved_draw);
-  // Wait for the blit to actually COMPLETE before handing the dma-buf to the
+  // Wait for the draw to actually COMPLETE before handing the dma-buf to the
   // compositor — glFlush only submits, so the compositor could sample a
   // half-written buffer. glFinish is the simple correct barrier; an EGL fence
   // (glClientWaitSync / explicit sync) is the later optimization.
   glFinish();
 
-  // Hand the blitted slot to render(): it does the wl_surface attach/commit on
+  // Hand the drawn slot to render(): it does the wl_surface attach/commit on
   // the main thread, exactly once per parent-surface commit, so the subsurface
   // and parent latch atomically. If a prior pending slot was never committed
   // (render() hasn't run yet), it is simply superseded here — we always present
@@ -457,7 +1144,7 @@ static gboolean fl_compositor_hdr_present_layers(FlCompositor* compositor,
 }
 
 // ---------------------------------------------------------------------------
-// FlCompositor::render (main thread) — commit the slot present_layers blitted
+// FlCompositor::render (main thread) — commit the slot present_layers drew
 // onto the subsurface (1:1 with GDK's parent commit) and clear the GTK parent
 // surface (the subsurface carries the pixels on top).
 // ---------------------------------------------------------------------------
@@ -473,7 +1160,7 @@ static gboolean fl_compositor_hdr_render(FlCompositor* compositor,
   GtkAllocation alloc;
   gtk_widget_get_allocation(self->widget, &alloc);
 
-  // Commit the slot present_layers blitted, here on the main thread — exactly
+  // Commit the slot present_layers drew, here on the main thread — exactly
   // once per parent-surface commit (GDK issues the parent commit right after
   // this draw returns). In sync mode the subsurface's new buffer latches
   // ATOMICALLY with the parent commit, eliminating the raster-thread
@@ -532,21 +1219,69 @@ static gboolean hdr_setup(FlCompositorHDR* self) {
     return FALSE;
   }
 
+  gint64 t0 = g_get_monotonic_time();
+
   self->queue = wl_display_create_queue(self->display);
-  struct wl_registry* reg = wl_display_get_registry(self->display);
-  wl_proxy_set_queue((struct wl_proxy*)reg, self->queue);
-  wl_registry_add_listener(reg, &registry_listener, self);
+  self->registry = wl_display_get_registry(self->display);
+  wl_proxy_set_queue((struct wl_proxy*)self->registry, self->queue);
+  wl_registry_add_listener(self->registry, &registry_listener, self);
   wl_display_roundtrip_queue(self->display, self->queue);
-  if (!self->comp || !self->subcomp || !self->dmabuf) {
-    g_warning("FlCompositorHDR: required Wayland globals missing "
-              "(wl_compositor/wl_subcompositor/zwp_linux_dmabuf_v1)");
-    wl_registry_destroy(reg);
+  gint64 t_registry = g_get_monotonic_time();
+  if (!self->comp || !self->subcomp || !self->dmabuf || !self->cm ||
+      self->outputs->len == 0) {
+    g_warning(
+        "FlCompositorHDR: required Wayland globals missing (wl_compositor/"
+        "wl_subcompositor/zwp_linux_dmabuf_v1/wp_color_manager_v1/wl_output)");
     return FALSE;
   }
   zwp_linux_dmabuf_v1_add_listener(self->dmabuf, &dmabuf_listener, self);
-  wl_registry_destroy(reg);
+  wp_color_manager_v1_add_listener(self->cm, &cm_listener, self);
+  // The registry roundtrip may have delivered wl_output globals before
+  // wp_color_manager_v1 — attach their color-management objects now.
+  for (guint i = 0; i < self->outputs->len; i++) {
+    HdrOutput* o = static_cast<HdrOutput*>(g_ptr_array_index(self->outputs, i));
+    if (o->cm_output == nullptr) {
+      o->cm_output = wp_color_manager_v1_get_output(self->cm, o->output);
+      wp_color_management_output_v1_add_listener(o->cm_output,
+                                                 &cm_output_listener, o);
+    }
+  }
+  wl_display_roundtrip_queue(self->display, self->queue);  // caps
+  gint64 t_caps = g_get_monotonic_time();
+  if (!self->cap_parametric || !self->cap_set_luminances ||
+      !self->cap_ext_linear || !self->cap_srgb_primaries ||
+      !self->cap_perceptual) {
+    g_warning(
+        "FlCompositorHDR: wp_color_manager_v1 lacks required capabilities "
+        "(parametric=%d set_luminances=%d ext_linear=%d srgb=%d "
+        "perceptual=%d)",
+        self->cap_parametric, self->cap_set_luminances, self->cap_ext_linear,
+        self->cap_srgb_primaries, self->cap_perceptual);
+    return FALSE;
+  }
+
+  // Initial (blocking) read of the current output's luminances, so the very
+  // first present already carries the right scale — no bright flash.
+  hdr_start_output_read(self);
+  for (int guard = 0;
+       (self->pending_desc != nullptr || self->pending_info != nullptr) &&
+       guard < 8;
+       guard++) {
+    wl_display_roundtrip_queue(self->display, self->queue);
+  }
+  gint64 t_output_read = g_get_monotonic_time();
+  if (self->out_max_lum == 0 || self->out_ref_lum == 0) {
+    g_warning(
+        "FlCompositorHDR: could not read output luminances; using SDR-neutral "
+        "defaults");
+    self->out_min_lum = 2000;  // 0.2 cd/m2
+    self->out_max_lum = 203;
+    self->out_ref_lum = 203;
+    self->present_scale = 1.0f;
+  }
 
   self->surface = wl_compositor_create_surface(self->comp);
+  wl_surface_add_listener(self->surface, &surface_listener, self);
   self->subsurface = wl_subcompositor_get_subsurface(
       self->subcomp, self->surface, self->parent);
   // Sync mode: the subsurface's committed content applies ATOMICALLY with the
@@ -561,6 +1296,38 @@ static gboolean hdr_setup(FlCompositorHDR* self) {
     self->viewport =
         wp_viewporter_get_viewport(self->viewporter, self->surface);
   }
+
+  // Tag the surface extended-linear (sRGB primaries) at the output's own
+  // luminance volume, blocking until the description is ready so the first
+  // commit already carries it. KWin anchors extended-linear 1.0 at max_lum,
+  // so pixels are pre-scaled by reference/max in the present draw: SDR white
+  // (Skia linear 1.0) lands at reference nits, HDR highlights reach up to
+  // max nits, brighter clamps at the panel peak.
+  self->cm_surface = wp_color_manager_v1_get_surface(self->cm, self->surface);
+  hdr_retag_surface(self);
+  for (int guard = 0; self->surface_desc_pending != nullptr && guard < 8;
+       guard++) {
+    wl_display_roundtrip_queue(self->display, self->queue);
+  }
+  if (self->surface_desc == nullptr) {
+    g_warning("FlCompositorHDR: extended-linear image description not ready");
+    return FALSE;
+  }
+  gint64 t_tag = g_get_monotonic_time();
+  // One-time cost, before the window maps. Measured 1.2-2.0ms total on
+  // KWin 6.6 (registry / caps / output-read / surface-tag each <1.5ms).
+  g_message(
+      "FlCompositorHDR: setup blocking roundtrips %.2fms total "
+      "(registry %.2f, caps %.2f, output-read %.2f, surface+tag %.2f)",
+      (t_tag - t0) / 1000.0, (t_registry - t0) / 1000.0,
+      (t_caps - t_registry) / 1000.0, (t_output_read - t_caps) / 1000.0,
+      (t_tag - t_output_read) / 1000.0);
+  g_message(
+      "FlCompositorHDR: F16 extended-linear present active (min=%.4f max=%u "
+      "ref=%u cd/m2, headroom %.2fx)",
+      self->out_min_lum / 1e4, self->out_max_lum, self->out_ref_lum,
+      (double)self->out_max_lum / self->out_ref_lum);
+
   wl_display_flush(self->display);
   return TRUE;
 }
@@ -572,9 +1339,8 @@ static void fl_compositor_hdr_dispose(GObject* object) {
   self->disposed = TRUE;
   g_mutex_unlock(&self->mutex);
 
-  gboolean have_gl =
-      self->opengl_manager != nullptr &&
-      fl_opengl_manager_make_current(self->opengl_manager);
+  gboolean have_gl = self->opengl_manager != nullptr &&
+                     fl_opengl_manager_make_current(self->opengl_manager);
   for (int i = 0; i < HDR_RING; i++) {
     if (have_gl) {
       hdr_buffer_free(self->ring[i]);
@@ -585,8 +1351,39 @@ static void fl_compositor_hdr_dispose(GObject* object) {
     for (GList* l = self->retired; l; l = l->next) {
       hdr_buffer_free(static_cast<HdrBuffer*>(l->data));
     }
+    if (self->program != 0) {
+      glDeleteProgram(self->program);
+      self->program = 0;
+    }
+    if (self->vertex_buffer != 0) {
+      glDeleteBuffers(1, &self->vertex_buffer);
+      self->vertex_buffer = 0;
+    }
   }
   g_clear_pointer(&self->retired, g_list_free);
+
+  if (self->pending_info) {
+    wp_image_description_info_v1_destroy(self->pending_info);
+    self->pending_info = nullptr;
+  }
+  if (self->pending_desc) {
+    wp_image_description_v1_destroy(self->pending_desc);
+    self->pending_desc = nullptr;
+  }
+  if (self->surface_desc_pending) {
+    wp_image_description_v1_destroy(self->surface_desc_pending);
+    self->surface_desc_pending = nullptr;
+  }
+  if (self->surface_desc) {
+    wp_image_description_v1_destroy(self->surface_desc);
+    self->surface_desc = nullptr;
+  }
+  if (self->cm_surface) {
+    wp_color_management_surface_v1_destroy(self->cm_surface);
+    self->cm_surface = nullptr;
+  }
+  g_clear_pointer(&self->outputs, g_ptr_array_unref);
+  self->current_output = nullptr;
 
   if (self->viewport) {
     wp_viewport_destroy(self->viewport);
@@ -603,7 +1400,12 @@ static void fl_compositor_hdr_dispose(GObject* object) {
   g_clear_pointer(&self->viewporter, wp_viewporter_destroy);
   g_clear_pointer(&self->subcomp, wl_subcompositor_destroy);
   g_clear_pointer(&self->dmabuf, zwp_linux_dmabuf_v1_destroy);
+  g_clear_pointer(&self->cm, wp_color_manager_v1_destroy);
   g_clear_pointer(&self->comp, wl_compositor_destroy);
+  if (self->registry) {
+    wl_registry_destroy(self->registry);
+    self->registry = nullptr;
+  }
   if (self->queue) {
     wl_event_queue_destroy(self->queue);
     self->queue = nullptr;
@@ -633,6 +1435,14 @@ static void fl_compositor_hdr_init(FlCompositorHDR* self) {
   g_mutex_init(&self->mutex);
   self->drm_fd = -1;
   self->pending_slot = -1;
+  self->present_scale = 1.0f;
+  self->headroom_milli = 1000;  // 1.0x = SDR until the output is read
+  self->outputs = g_ptr_array_new_with_free_func(hdr_output_free);
+}
+
+double fl_compositor_hdr_get_display_headroom(FlCompositorHDR* self) {
+  g_return_val_if_fail(FL_IS_COMPOSITOR_HDR(self), 1.0);
+  return g_atomic_int_get(&self->headroom_milli) / 1000.0;
 }
 
 FlCompositorHDR* fl_compositor_hdr_new(FlTaskRunner* task_runner,
