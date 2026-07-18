@@ -86,7 +86,7 @@ FlOpenGLManager* fl_engine_get_opengl_manager(FlEngine* engine);
  * @engine: an #FlEngine.
  * @enable: %TRUE to allocate OpenGL backing stores as GL_RGBA16F.
  *
- * OLYM Linux HDR: switches new OpenGL backing stores to F16 (linear scRGB
+ * Switches new OpenGL backing stores to F16 (linear scRGB
  * Skia surfaces). Called by #FlView when it selects the HDR compositor,
  * before the first frame is rendered.
  */

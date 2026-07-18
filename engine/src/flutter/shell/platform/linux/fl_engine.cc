@@ -105,11 +105,11 @@ struct _FlEngine {
   gpointer platform_message_handler_data;
   GDestroyNotify platform_message_handler_destroy_notify;
 
-  // OLYM Linux HDR: when TRUE, OpenGL backing stores are allocated as
-  // GL_RGBA16F instead of 8-bit. Set by FlView when it selects the
-  // HDR-capable compositor (FlCompositorHDR); embedder.cc then wraps the
-  // stores as kRGBA_F16_SkColorType with a linear color space, so Skia
-  // composites linear scRGB values (1.0 = SDR white) end to end.
+  // When TRUE, OpenGL backing stores are allocated as GL_RGBA16F instead of
+  // 8-bit. Set by FlView when it selects the HDR-capable compositor
+  // (FlCompositorHDR); embedder.cc then wraps the stores as
+  // kRGBA_F16_SkColorType with a linear color space, so Skia composites
+  // linear scRGB values (1.0 = SDR white) end to end.
   gboolean f16_backing_stores;
 };
 
@@ -265,7 +265,7 @@ static bool create_opengl_backing_store(
   GLint sized_format = GL_RGBA8;
   GLint general_format = GL_RGBA;
   if (self->f16_backing_stores) {
-    // OLYM Linux HDR: F16 stores. embedder.cc maps GL_RGBA16F to
+    // HDR presentation: F16 stores. embedder.cc maps GL_RGBA16F to
     // kRGBA_F16_SkColorType + a linear color space (see
     // MakeSkSurfaceFromBackingStore), matching the Windows F16 path.
     sized_format = GL_RGBA16F;

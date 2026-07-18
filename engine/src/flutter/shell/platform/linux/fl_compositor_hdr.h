@@ -14,9 +14,9 @@
 
 G_BEGIN_DECLS
 
-// OLYM Phase-6 Linux HDR. An FlCompositor that presents Flutter's composited
-// frame on an engine-owned Wayland wl_subsurface (a sibling above GDK's
-// toplevel surface) backed by a GPU-resident dma-buf ring — Flutter composites
+// An FlCompositor that presents Flutter's composited frame on an engine-owned
+// Wayland wl_subsurface (a sibling above GDK's toplevel surface) backed by a
+// GPU-resident dma-buf ring — Flutter composites
 // straight into F16 (linear scRGB) backing stores, a present shader draws them
 // into a GBM-backed ABGR16161616F FBO, and the same buffer is handed to the
 // compositor as an extended-linear (EXT_LINEAR + sRGB primaries) tagged

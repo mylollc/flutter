@@ -453,7 +453,7 @@ static void setup_opengl(FlView* self) {
   gboolean shareable =
       GDK_IS_WAYLAND_DISPLAY(gtk_widget_get_display(GTK_WIDGET(self)));
 
-  // OLYM Phase-6 Linux HDR: on Wayland, present via an engine-owned
+  // HDR presentation: on Wayland, present via an engine-owned
   // wl_subsurface (GPU-resident dma-buf). fl_compositor_hdr_new returns NULL if
   // the session isn't Wayland or the required globals are missing, in which
   // case we fall back to the OpenGL/GDK compositor (X11 / no-CM path

@@ -20,11 +20,11 @@
 #include "flutter/shell/platform/linux/wayland_vendor/viewporter-client-protocol.h"
 
 // DRM fourccs (avoid a libdrm include; these are the stable fourcc codes).
-#define OLYM_FOURCC(a, b, c, d)                                   \
+#define FL_FOURCC(a, b, c, d)                                     \
   ((uint32_t)(a) | ((uint32_t)(b) << 8) | ((uint32_t)(c) << 16) | \
    ((uint32_t)(d) << 24))
 // [16:16:16:16] R:G:B:A little-endian, IEEE half-float per channel.
-#define OLYM_DRM_FORMAT_ABGR16161616F OLYM_FOURCC('A', 'B', '4', 'H')
+#define FL_DRM_FORMAT_ABGR16161616F FL_FOURCC('A', 'B', '4', 'H')
 
 // EGL device-query tokens (define defensively; the bullseye sysroot's eglext.h
 // predates EGL_EXT_device_drm_render_node).
@@ -446,7 +446,7 @@ static void info_done(void* data, struct wp_image_description_info_v1* info) {
     g_atomic_int_set(&self->headroom_milli,
                      (gint)((1000.0 * self->out_max_lum) / self->out_ref_lum));
     if (changed) {
-      g_message(
+      g_debug(
           "FlCompositorHDR: output luminances min=%.4f max=%u ref=%u cd/m2 "
           "(headroom %.2fx, present scale %.4f)",
           self->out_min_lum / 1e4, self->out_max_lum, self->out_ref_lum,
@@ -490,13 +490,13 @@ static void hdr_output_free(gpointer data) {
   if (o->output != nullptr) {
     wl_output_destroy(o->output);
   }
-  free(o);
+  g_free(o);
 }
 
 static void hdr_output_add(FlCompositorHDR* self,
                            uint32_t name,
                            struct wl_output* output) {
-  HdrOutput* o = static_cast<HdrOutput*>(calloc(1, sizeof(HdrOutput)));
+  HdrOutput* o = g_new0(HdrOutput, 1);
   o->owner = self;
   o->global_name = name;
   o->output = output;
@@ -608,7 +608,7 @@ static void hdr_buffer_free(HdrBuffer* b) {
   if (b->bo) {
     gbm_bo_destroy(b->bo);
   }
-  free(b);
+  g_free(b);
 }
 
 // wl_buffer.release — dispatched on the raster thread (queue drained in
@@ -643,13 +643,13 @@ static void hdr_sweep_retired(FlCompositorHDR* self) {
 }
 
 static HdrBuffer* hdr_buffer_new(FlCompositorHDR* self, size_t w, size_t h) {
-  HdrBuffer* b = static_cast<HdrBuffer*>(calloc(1, sizeof(HdrBuffer)));
+  HdrBuffer* b = g_new0(HdrBuffer, 1);
   b->owner = self;
   b->image = EGL_NO_IMAGE_KHR;
   b->w = w;
   b->h = h;
 
-  b->bo = gbm_bo_create(self->gbm, w, h, OLYM_DRM_FORMAT_ABGR16161616F,
+  b->bo = gbm_bo_create(self->gbm, w, h, FL_DRM_FORMAT_ABGR16161616F,
                         GBM_BO_USE_LINEAR | GBM_BO_USE_RENDERING);
   if (!b->bo) {
     g_warning("FlCompositorHDR: gbm_bo_create %zux%zu (F16) failed", w, h);
@@ -666,7 +666,7 @@ static HdrBuffer* hdr_buffer_new(FlCompositorHDR* self, size_t w, size_t h) {
                     EGL_HEIGHT,
                     (EGLint)h,
                     EGL_LINUX_DRM_FOURCC_EXT,
-                    (EGLint)OLYM_DRM_FORMAT_ABGR16161616F,
+                    (EGLint)FL_DRM_FORMAT_ABGR16161616F,
                     EGL_DMA_BUF_PLANE0_FD_EXT,
                     fd_egl,
                     EGL_DMA_BUF_PLANE0_OFFSET_EXT,
@@ -708,7 +708,7 @@ static HdrBuffer* hdr_buffer_new(FlCompositorHDR* self, size_t w, size_t h) {
       zwp_linux_dmabuf_v1_create_params(self->dmabuf);
   zwp_linux_buffer_params_v1_add(params, fd_wl, 0, offset, stride, 0, 0);
   b->buffer = zwp_linux_buffer_params_v1_create_immed(
-      params, w, h, OLYM_DRM_FORMAT_ABGR16161616F, 0);
+      params, w, h, FL_DRM_FORMAT_ABGR16161616F, 0);
   zwp_linux_buffer_params_v1_destroy(params);
   close(fd_wl);
   if (!b->buffer) {
@@ -1082,8 +1082,8 @@ static gboolean fl_compositor_hdr_present_layers(FlCompositor* compositor,
   if (disposed) {
     return TRUE;
   }
-  // We present only the base backing store (layers[0]); Olym's Linux scene is a
-  // single backing-store layer (no platform views).
+  // We present only the base backing store (layers[0]); the embedder's Linux
+  // scene is a single backing-store layer (no platform views).
   const FlutterLayer* layer = layers[0];
   if (layer->type != kFlutterLayerContentTypeBackingStore) {
     return TRUE;
@@ -1126,11 +1126,14 @@ static gboolean fl_compositor_hdr_present_layers(FlCompositor* compositor,
   } else {
     hdr_present_blit(src, b, w, h);
   }
-  // Wait for the draw to actually COMPLETE before handing the dma-buf to the
-  // compositor — glFlush only submits, so the compositor could sample a
-  // half-written buffer. glFinish is the simple correct barrier; an EGL fence
-  // (glClientWaitSync / explicit sync) is the later optimization.
-  glFinish();
+  // Submit the draw. No CPU-side wait is needed before handing the dma-buf to
+  // the compositor: on Mesa the kernel attaches the submitted batch's fences
+  // to the buffer's reservation object (dma-buf implicit sync), so the
+  // compositor's own GPU work waits on the render automatically — the same
+  // contract eglSwapBuffers relies on. The flush must happen before render()
+  // commits the buffer; that ordering is guaranteed by the pending_slot
+  // handoff below.
+  glFlush();
 
   // Hand the drawn slot to render(): it does the wl_surface attach/commit on
   // the main thread, exactly once per parent-surface commit, so the subsurface
@@ -1316,13 +1319,13 @@ static gboolean hdr_setup(FlCompositorHDR* self) {
   gint64 t_tag = g_get_monotonic_time();
   // One-time cost, before the window maps. Measured 1.2-2.0ms total on
   // KWin 6.6 (registry / caps / output-read / surface-tag each <1.5ms).
-  g_message(
+  g_debug(
       "FlCompositorHDR: setup blocking roundtrips %.2fms total "
       "(registry %.2f, caps %.2f, output-read %.2f, surface+tag %.2f)",
       (t_tag - t0) / 1000.0, (t_registry - t0) / 1000.0,
       (t_caps - t_registry) / 1000.0, (t_output_read - t_caps) / 1000.0,
       (t_tag - t_output_read) / 1000.0);
-  g_message(
+  g_debug(
       "FlCompositorHDR: F16 extended-linear present active (min=%.4f max=%u "
       "ref=%u cd/m2, headroom %.2fx)",
       self->out_min_lum / 1e4, self->out_max_lum, self->out_ref_lum,
