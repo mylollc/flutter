@@ -724,38 +724,78 @@ static HdrBuffer* hdr_buffer_new(FlCompositorHDR* self, size_t w, size_t h) {
 // GBM device on the GL context's own render node (raster thread) — no
 // cross-GPU write; KWin imports the result for the display (standard PRIME).
 // ---------------------------------------------------------------------------
+// Try to adopt `node` as the GBM allocation device: open it, create the GBM
+// device, and VALIDATE it by allocating (and freeing) a minimal buffer of the
+// ring's actual format — a device whose GBM backend cannot allocate our
+// buffers (e.g. the NVIDIA proprietary driver's allocator, which rejects
+// LINEAR render buffers of these formats) is rejected here instead of
+// failing on every frame later. On success the fd/device are stored on
+// `self`; on failure everything is cleaned up and FALSE is returned.
+static gboolean hdr_gbm_try_node(FlCompositorHDR* self, const char* node) {
+  int fd = open(node, O_RDWR | O_CLOEXEC);
+  if (fd < 0) {
+    return FALSE;
+  }
+  struct gbm_device* gbm = gbm_create_device(fd);
+  if (gbm == nullptr) {
+    close(fd);
+    return FALSE;
+  }
+  struct gbm_bo* probe =
+      gbm_bo_create(gbm, 16, 16, FL_DRM_FORMAT_ABGR16161616F,
+                    GBM_BO_USE_LINEAR | GBM_BO_USE_RENDERING);
+  if (probe == nullptr) {
+    gbm_device_destroy(gbm);
+    close(fd);
+    return FALSE;
+  }
+  gbm_bo_destroy(probe);
+  self->drm_fd = fd;
+  self->gbm = gbm;
+  g_debug("FlCompositorHDR: GBM allocation device = %s (backend %s)", node,
+          gbm_device_get_backend_name(self->gbm));
+  return TRUE;
+}
+
 static gboolean hdr_gbm_ensure(FlCompositorHDR* self) {
   if (self->gbm) {
     return TRUE;
   }
-  const char* node = nullptr;
+  // First choice: the node of the GL context's own device (same-GPU
+  // allocation, no cross-device import).
   EGLDisplay dpy = eglGetCurrentDisplay();
   if (dpy != EGL_NO_DISPLAY &&
       epoxy_has_egl_extension(dpy, "EGL_EXT_device_query")) {
     EGLAttrib dev = 0;
     if (eglQueryDisplayAttribEXT(dpy, EGL_DEVICE_EXT, &dev) && dev) {
-      node = eglQueryDeviceStringEXT((EGLDeviceEXT)dev,
-                                     EGL_DRM_RENDER_NODE_FILE_EXT);
-      if (!node) {
+      const char* node = eglQueryDeviceStringEXT((EGLDeviceEXT)dev,
+                                                 EGL_DRM_RENDER_NODE_FILE_EXT);
+      if (node == nullptr) {
         node =
             eglQueryDeviceStringEXT((EGLDeviceEXT)dev, EGL_DRM_DEVICE_FILE_EXT);
       }
+      if (node != nullptr && hdr_gbm_try_node(self, node)) {
+        return TRUE;
+      }
     }
   }
-  if (!node) {
-    node = "/dev/dri/renderD128";  // Intel/Mesa fallback (GBM-capable, eDP GPU)
+  // Fallback: scan the render nodes and adopt the first whose GBM backend
+  // passes the allocation probe. DRM node numbers are assigned in device
+  // enumeration order, which is NOT stable across boots (a hybrid box can
+  // swap renderD128/renderD129 on reboot), so a fixed node name is never
+  // correct here. LINEAR buffers import across devices, so a non-GL-device
+  // allocator still composites correctly. Render nodes occupy DRM minors
+  // 128-191; probing an absent node fails fast in open().
+  for (int i = 128; i < 192; i++) {
+    g_autofree gchar* node = g_strdup_printf("/dev/dri/renderD%d", i);
+    if (hdr_gbm_try_node(self, node)) {
+      return TRUE;
+    }
   }
-  self->drm_fd = open(node, O_RDWR | O_CLOEXEC);
-  if (self->drm_fd < 0) {
-    g_warning("FlCompositorHDR: open(%s) failed", node);
-    return FALSE;
-  }
-  self->gbm = gbm_create_device(self->drm_fd);
-  if (!self->gbm) {
-    g_warning("FlCompositorHDR: gbm_create_device(%s) failed", node);
-    return FALSE;
-  }
-  return TRUE;
+  g_warning(
+      "FlCompositorHDR: no render node with a GBM backend that can allocate "
+      "the present ring (F16 linear) — falling back");
+  return FALSE;
 }
 
 // (Re)allocate the ring for size w x h (raster thread, GL context current).
