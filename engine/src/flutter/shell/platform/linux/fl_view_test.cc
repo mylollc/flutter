@@ -30,6 +30,16 @@ TEST(FlViewTest, GetEngine) {
   EXPECT_NE(engine, nullptr);
 }
 
+// Off the HDR presentation path (X11, no color management, tests) the
+// display headroom is exactly 1.0 — SDR. App code divides by this value.
+TEST(FlViewTest, DisplayHeadroomDefaultsToSdr) {
+  flutter::testing::fl_ensure_gtk_init();
+  g_autoptr(FlDartProject) project = fl_dart_project_new();
+  FlView* view = fl_view_new(project);
+
+  EXPECT_EQ(fl_view_get_display_headroom(view), 1.0);
+}
+
 TEST(FlViewTest, StateUpdateDoesNotHappenInInit) {
   flutter::testing::fl_ensure_gtk_init();
   g_autoptr(FlDartProject) project = fl_dart_project_new();

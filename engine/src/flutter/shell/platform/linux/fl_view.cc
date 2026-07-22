@@ -472,8 +472,9 @@ static void setup_opengl(FlView* self) {
       fl_engine_set_f16_backing_stores(self->engine, TRUE);
       return;
     }
-    g_warning(
-        "olym-hdr: FlCompositorHDR unavailable; using FlCompositorOpenGL");
+    // Expected on X11 and Wayland sessions without color management — the
+    // stock path is the correct behavior there, not a failure.
+    g_debug("FlView: FlCompositorHDR unavailable; using FlCompositorOpenGL");
   }
 
   self->compositor = FL_COMPOSITOR(fl_compositor_opengl_new(

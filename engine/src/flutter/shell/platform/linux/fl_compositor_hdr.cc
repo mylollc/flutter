@@ -56,6 +56,10 @@
 typedef struct _HdrBuffer {
   struct _FlCompositorHDR* owner;
   struct gbm_bo* bo;
+  // The display the EGLImage was created on. EGL images are display (not
+  // context) resources, so teardown works without a current GL context —
+  // dispose may run after the raster context is gone.
+  EGLDisplay dpy;
   EGLImageKHR image;
   GLuint texture;
   GLuint fbo;
@@ -143,9 +147,17 @@ struct _FlCompositorHDR {
   struct wp_image_description_v1* surface_desc;
   struct wp_image_description_v1* surface_desc_pending;
 
+  // Failure latches (raster thread). GBM device discovery is topology-bound
+  // and never retried once it fails; ring-buffer allocation IS retried
+  // (VRAM pressure can be transient) but warns once per failure episode.
+  gboolean gbm_failed;
+  gboolean alloc_warned;
+
   // Present-shader objects (raster thread, lazily created).
   GLuint program;
   GLint scale_location;
+  GLint dst_offset_location;
+  GLint dst_scale_location;
   GLuint vertex_buffer;
   gboolean program_failed;  // compile/link failed; fall back to blit
 
@@ -589,18 +601,24 @@ static const struct wl_surface_listener surface_listener = {surface_enter,
 // ---------------------------------------------------------------------------
 // buffer lifecycle
 // ---------------------------------------------------------------------------
-static void hdr_buffer_free(HdrBuffer* b) {
+// `have_gl` = a GL context is current. GL names (FBO/texture) can only be
+// deleted with a context; when none exists (dispose after context teardown)
+// they die with the context, and everything else — the EGL image (a display
+// resource), the wl_buffer, the gbm_bo — is still freed.
+static void hdr_buffer_free(HdrBuffer* b, gboolean have_gl) {
   if (!b) {
     return;
   }
-  if (b->fbo) {
-    glDeleteFramebuffers(1, &b->fbo);
-  }
-  if (b->texture) {
-    glDeleteTextures(1, &b->texture);
+  if (have_gl) {
+    if (b->fbo) {
+      glDeleteFramebuffers(1, &b->fbo);
+    }
+    if (b->texture) {
+      glDeleteTextures(1, &b->texture);
+    }
   }
   if (b->image != EGL_NO_IMAGE_KHR) {
-    eglDestroyImageKHR(eglGetCurrentDisplay(), b->image);
+    eglDestroyImageKHR(b->dpy, b->image);
   }
   if (b->buffer) {
     wl_buffer_destroy(b->buffer);
@@ -635,7 +653,8 @@ static void hdr_sweep_retired(FlCompositorHDR* self) {
     if (busy) {
       keep = g_list_prepend(keep, b);
     } else {
-      hdr_buffer_free(b);  // GL deletes on the raster context (this thread)
+      // GL deletes on the raster context (this thread).
+      hdr_buffer_free(b, TRUE);
     }
   }
   g_list_free(self->retired);
@@ -652,14 +671,18 @@ static HdrBuffer* hdr_buffer_new(FlCompositorHDR* self, size_t w, size_t h) {
   b->bo = gbm_bo_create(self->gbm, w, h, FL_DRM_FORMAT_ABGR16161616F,
                         GBM_BO_USE_LINEAR | GBM_BO_USE_RENDERING);
   if (!b->bo) {
-    g_warning("FlCompositorHDR: gbm_bo_create %zux%zu (F16) failed", w, h);
-    hdr_buffer_free(b);
+    if (!self->alloc_warned) {
+      self->alloc_warned = TRUE;
+      g_warning("FlCompositorHDR: gbm_bo_create %zux%zu (F16) failed", w, h);
+    }
+    hdr_buffer_free(b, TRUE);
     return nullptr;
   }
   uint32_t stride = gbm_bo_get_stride(b->bo);
   uint32_t offset = gbm_bo_get_offset(b->bo, 0);
 
   EGLDisplay dpy = eglGetCurrentDisplay();
+  b->dpy = dpy;
   int fd_egl = gbm_bo_get_fd(b->bo);
   EGLint attrs[] = {EGL_WIDTH,
                     (EGLint)w,
@@ -678,9 +701,12 @@ static HdrBuffer* hdr_buffer_new(FlCompositorHDR* self, size_t w, size_t h) {
                                (EGLClientBuffer)NULL, attrs);
   close(fd_egl);
   if (b->image == EGL_NO_IMAGE_KHR) {
-    g_warning("FlCompositorHDR: eglCreateImageKHR (F16) failed egl=0x%x",
-              eglGetError());
-    hdr_buffer_free(b);
+    if (!self->alloc_warned) {
+      self->alloc_warned = TRUE;
+      g_warning("FlCompositorHDR: eglCreateImageKHR (F16) failed egl=0x%x",
+                eglGetError());
+    }
+    hdr_buffer_free(b, TRUE);
     return nullptr;
   }
 
@@ -698,8 +724,11 @@ static HdrBuffer* hdr_buffer_new(FlCompositorHDR* self, size_t w, size_t h) {
       glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
   glBindFramebuffer(GL_FRAMEBUFFER, 0);
   if (!complete) {
-    g_warning("FlCompositorHDR: F16 dma-buf FBO incomplete");
-    hdr_buffer_free(b);
+    if (!self->alloc_warned) {
+      self->alloc_warned = TRUE;
+      g_warning("FlCompositorHDR: F16 dma-buf FBO incomplete");
+    }
+    hdr_buffer_free(b, TRUE);
     return nullptr;
   }
 
@@ -712,8 +741,11 @@ static HdrBuffer* hdr_buffer_new(FlCompositorHDR* self, size_t w, size_t h) {
   zwp_linux_buffer_params_v1_destroy(params);
   close(fd_wl);
   if (!b->buffer) {
-    g_warning("FlCompositorHDR: zwp_linux_buffer_params create_immed failed");
-    hdr_buffer_free(b);
+    if (!self->alloc_warned) {
+      self->alloc_warned = TRUE;
+      g_warning("FlCompositorHDR: zwp_linux_buffer_params create_immed failed");
+    }
+    hdr_buffer_free(b, TRUE);
     return nullptr;
   }
   wl_buffer_add_listener(b->buffer, &buffer_listener, b);
@@ -761,6 +793,9 @@ static gboolean hdr_gbm_ensure(FlCompositorHDR* self) {
   if (self->gbm) {
     return TRUE;
   }
+  if (self->gbm_failed) {
+    return FALSE;  // topology-bound; warned once at latch time
+  }
   // First choice: the node of the GL context's own device (same-GPU
   // allocation, no cross-device import).
   EGLDisplay dpy = eglGetCurrentDisplay();
@@ -795,6 +830,7 @@ static gboolean hdr_gbm_ensure(FlCompositorHDR* self) {
   g_warning(
       "FlCompositorHDR: no render node with a GBM backend that can allocate "
       "the present ring (F16 linear) — falling back");
+  self->gbm_failed = TRUE;
   return FALSE;
 }
 
@@ -827,7 +863,7 @@ static gboolean hdr_ring_ensure(FlCompositorHDR* self, size_t w, size_t h) {
       b->retired = TRUE;
       self->retired = g_list_prepend(self->retired, b);
     } else {
-      hdr_buffer_free(b);
+      hdr_buffer_free(b, TRUE);
     }
   }
   g_mutex_unlock(&self->mutex);
@@ -838,6 +874,7 @@ static gboolean hdr_ring_ensure(FlCompositorHDR* self, size_t w, size_t h) {
       return FALSE;
     }
   }
+  self->alloc_warned = FALSE;  // recovered; a future episode warns again
   self->ring_w = w;
   self->ring_h = h;
   return TRUE;
@@ -857,10 +894,13 @@ static gboolean hdr_ring_ensure(FlCompositorHDR* self, size_t w, size_t h) {
 static const char* present_vertex_src =
     "attribute vec2 position;\n"
     "attribute vec2 in_texcoord;\n"
+    "uniform vec2 dst_offset;\n"
+    "uniform vec2 dst_scale;\n"
     "varying vec2 texcoord;\n"
     "\n"
     "void main() {\n"
-    "  gl_Position = vec4(position, 0, 1);\n"
+    "  vec2 p = dst_offset + position * dst_scale;\n"
+    "  gl_Position = vec4(p * 2.0 - 1.0, 0, 1);\n"
     "  texcoord = in_texcoord;\n"
     "}\n";
 
@@ -938,15 +978,18 @@ static gboolean hdr_program_ensure(FlCompositorHDR* self) {
 
   self->program = program;
   self->scale_location = glGetUniformLocation(program, "out_scale");
+  self->dst_offset_location = glGetUniformLocation(program, "dst_offset");
+  self->dst_scale_location = glGetUniformLocation(program, "dst_scale");
   GLint texture_location = glGetUniformLocation(program, "texture");
 
-  // Fullscreen quad (pos.xy, uv). The v coordinate is flipped relative to
-  // position so the bottom-left-origin GL backing store lands top-row-first
-  // in the dma-buf, which is what the Wayland buffer expects (same flip the
-  // previous glBlitFramebuffer(0,0,w,h -> 0,h,w,0) did).
+  // Unit quad (pos.xy in [0,1] — the vertex shader maps it through the
+  // per-layer dst rect to NDC; layer 0 uses offset 0 / scale 1 =
+  // fullscreen). The v coordinate is flipped relative to position so the
+  // bottom-left-origin GL backing store lands top-row-first in the dma-buf,
+  // which is what the Wayland buffer expects (same flip the previous
+  // glBlitFramebuffer(0,0,w,h -> 0,h,w,0) did).
   GLfloat vertex_data[] = {
-      -1, -1, 0, 1, 1, 1,  1, 0, -1, 1, 0, 0,
-      -1, -1, 0, 1, 1, -1, 1, 1, 1,  1, 1, 0,
+      0, 0, 0, 1, 1, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 1, 0, 1, 1, 1, 1, 1, 0,
   };
   GLint saved_array_buffer = 0;
   glGetIntegerv(GL_ARRAY_BUFFER_BINDING, &saved_array_buffer);
@@ -972,7 +1015,8 @@ static gboolean hdr_program_ensure(FlCompositorHDR* self) {
 // the comprehensive save/restore stock FlCompositorOpenGL uses, plus the
 // ones a draw adds over a blit.)
 static void hdr_present_draw(FlCompositorHDR* self,
-                             FlFramebuffer* src,
+                             const FlutterLayer** layers,
+                             size_t layers_count,
                              HdrBuffer* dst,
                              size_t w,
                              size_t h) {
@@ -1026,7 +1070,6 @@ static void hdr_present_draw(FlCompositorHDR* self,
   glUniform1f(self->scale_location, self->present_scale);
 
   glBindSampler(0, 0);  // texture-object params (NEAREST), not a sampler's
-  glBindTexture(GL_TEXTURE_2D, fl_framebuffer_get_texture_id(src));
 
   // Like stock FlCompositorOpenGL: VAOs can't be shared between contexts, so
   // build a transient one per present.
@@ -1044,7 +1087,37 @@ static void hdr_present_draw(FlCompositorHDR* self,
                         sizeof(GLfloat) * 4,
                         reinterpret_cast<void*>(sizeof(GLfloat) * 2));
 
-  glDrawArrays(GL_TRIANGLES, 0, 6);
+  // Composite every backing-store layer, stock-FlCompositorOpenGL parity:
+  // the base layer fills the target opaquely; overlay layers alpha-blend at
+  // their offsets. Layer placement is Y-flipped into the dma-buf's
+  // top-row-first space (the same flip the quad's texcoords perform for the
+  // pixels). Platform views are not implemented on Linux (upstream
+  // flutter#41724), matching stock.
+  gboolean first_layer = TRUE;
+  for (size_t i = 0; i < layers_count; ++i) {
+    const FlutterLayer* layer = layers[i];
+    if (layer->type != kFlutterLayerContentTypeBackingStore) {
+      continue;
+    }
+    FlFramebuffer* src =
+        FL_FRAMEBUFFER(layer->backing_store->open_gl.framebuffer.user_data);
+    if (first_layer) {
+      glDisable(GL_BLEND);
+      first_layer = FALSE;
+    } else {
+      glEnable(GL_BLEND);
+      glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    }
+    double lx = layer->offset.x;
+    double ly = layer->offset.y;
+    double lw = layer->size.width;
+    double lh = layer->size.height;
+    glUniform2f(self->dst_offset_location, lx / w, (h - ly - lh) / h);
+    glUniform2f(self->dst_scale_location, lw / w, lh / h);
+    glBindTexture(GL_TEXTURE_2D, fl_framebuffer_get_texture_id(src));
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+  }
+  glDisable(GL_BLEND);
 
   glDeleteVertexArrays(1, &vao);
 
@@ -1122,14 +1195,12 @@ static gboolean fl_compositor_hdr_present_layers(FlCompositor* compositor,
   if (disposed) {
     return TRUE;
   }
-  // We present only the base backing store (layers[0]); the embedder's Linux
-  // scene is a single backing-store layer (no platform views).
+  // The base layer sizes the target; hdr_present_draw composites the full
+  // layer list (platform views excluded, as in stock — flutter#41724).
   const FlutterLayer* layer = layers[0];
   if (layer->type != kFlutterLayerContentTypeBackingStore) {
     return TRUE;
   }
-  FlFramebuffer* src =
-      FL_FRAMEBUFFER(layer->backing_store->open_gl.framebuffer.user_data);
   size_t w = layer->size.width;
   size_t h = layer->size.height;
 
@@ -1159,12 +1230,15 @@ static gboolean fl_compositor_hdr_present_layers(FlCompositor* compositor,
   }
   HdrBuffer* b = self->ring[slot];
 
-  // Composite: draw the backing store into the bo-backed FBO (Y-flip +
-  // reference/max scale). Blit fallback only if the program can't build.
+  // Composite: draw the layers into the bo-backed FBO (Y-flip +
+  // reference/max scale). Blit fallback (base layer only) if the program
+  // can't build.
   if (hdr_program_ensure(self)) {
-    hdr_present_draw(self, src, b, w, h);
+    hdr_present_draw(self, layers, layers_count, b, w, h);
   } else {
-    hdr_present_blit(src, b, w, h);
+    hdr_present_blit(
+        FL_FRAMEBUFFER(layer->backing_store->open_gl.framebuffer.user_data), b,
+        w, h);
   }
   // Submit the draw. No CPU-side wait is needed before handing the dma-buf to
   // the compositor: on Mesa the kernel attaches the submitted batch's fences
@@ -1385,15 +1459,13 @@ static void fl_compositor_hdr_dispose(GObject* object) {
   gboolean have_gl = self->opengl_manager != nullptr &&
                      fl_opengl_manager_make_current(self->opengl_manager);
   for (int i = 0; i < HDR_RING; i++) {
-    if (have_gl) {
-      hdr_buffer_free(self->ring[i]);
-    }
+    hdr_buffer_free(self->ring[i], have_gl);
     self->ring[i] = nullptr;
   }
+  for (GList* l = self->retired; l; l = l->next) {
+    hdr_buffer_free(static_cast<HdrBuffer*>(l->data), have_gl);
+  }
   if (have_gl) {
-    for (GList* l = self->retired; l; l = l->next) {
-      hdr_buffer_free(static_cast<HdrBuffer*>(l->data));
-    }
     if (self->program != 0) {
       glDeleteProgram(self->program);
       self->program = 0;

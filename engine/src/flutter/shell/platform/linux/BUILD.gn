@@ -319,6 +319,7 @@ executable("flutter_linux_unittests") {
     "testing/mock_settings.cc",
     "testing/mock_signal_handler.cc",
     "testing/mock_texture_registrar.cc",
+    "testing/mock_wayland.cc",
   ]
 
   public_configs = [ "//flutter:config" ]

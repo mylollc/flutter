@@ -584,7 +584,12 @@ static void _glTexImage2D(GLenum target,
                           GLint border,
                           GLenum format,
                           GLenum type,
-                          const void* pixels) {}
+                          const void* pixels) {
+  if (mock) {
+    mock->glTexImage2D(target, level, internalformat, width, height, border,
+                       format, type, pixels);
+  }
+}
 
 static GLenum _glGetError() {
   return GL_NO_ERROR;
