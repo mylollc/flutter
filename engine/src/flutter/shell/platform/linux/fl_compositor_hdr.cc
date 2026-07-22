@@ -64,7 +64,11 @@ typedef struct _HdrBuffer {
   GLuint texture;
   GLuint fbo;
   struct wl_buffer* buffer;
-  size_t w, h;
+  size_t w, h;  // allocated buffer dimensions (>= the content drawn into it)
+  // Dimensions of the frame drawn into the buffer's top-left region for the
+  // most recent present (written by present_layers before publishing the
+  // slot; read by render() for the viewport source rect + damage).
+  size_t content_w, content_h;
   gboolean busy;     // committed; the compositor holds it until release
   gboolean retired;  // dropped from the ring on resize; free on release
 } HdrBuffer;
@@ -185,6 +189,17 @@ struct _FlCompositorHDR {
   HdrBuffer* ring[HDR_RING];
   GList* retired;  // HdrBuffer* awaiting release after a resize
   size_t ring_w, ring_h;
+
+  // Synchronized-resize state (main thread only): the content size of the
+  // last committed frame, and whether anything has been committed yet.
+  // render() compares these against the widget's current size to decide
+  // whether to wait for a matching frame (see the wait loop there).
+  size_t last_content_w, last_content_h;
+  gboolean committed_once;
+  // A target size whose wait already timed out once — don't wait for it
+  // again (a systematic engine-vs-widget size formula mismatch must cost one
+  // hiccup, not one per frame). Cleared when a wait succeeds.
+  size_t wait_failed_w, wait_failed_h;
 
   // Present handoff. present_layers (raster) draws into a ring slot and
   // publishes `pending_slot`; render() (main thread) does the Wayland
@@ -905,16 +920,41 @@ static gboolean hdr_gbm_ensure(FlCompositorHDR* self) {
   return FALSE;
 }
 
-// (Re)allocate the ring for size w x h (raster thread, GL context current).
-// On a size change, in-flight (busy) buffers are RETIRED (kept alive until
+// Round a buffer dimension up so an interactive grow-drag reallocates the
+// ring a handful of times (once per 256-px band) instead of once per pixel.
+static size_t hdr_round_up_dim(size_t dim) {
+  return (dim + 255) & ~(size_t)255;
+}
+
+// Ensure the ring can hold a w x h frame (raster thread, GL context current).
+//
+// With a viewport (wp_viewporter), buffers are GROW-ONLY: they are allocated
+// with rounded-up headroom and kept when the frame shrinks — the frame draws
+// into the top-left content region and render() crops it with
+// wp_viewport_set_source. This is what keeps interactive resize fluid: the
+// old exact-size model reallocated 3 F16 GBM buffers + EGLImages + FBOs at
+// EVERY intermediate drag size, so content visibly lagged the frame. The
+// memory cost of the high-water mark (a few hundred MB at 4K F16) is
+// deliberate; buffers are freed on dispose. Without a viewport there is no
+// crop, so the ring stays exact-size (every resize reallocates, as before).
+//
+// On a reallocation, in-flight (busy) buffers are RETIRED (kept alive until
 // their release) rather than freed, so the main thread can safely still be
 // presenting one; non-busy buffers are freed immediately.
 static gboolean hdr_ring_ensure(FlCompositorHDR* self, size_t w, size_t h) {
   if (!hdr_gbm_ensure(self)) {
     return FALSE;
   }
-  if (self->ring_w == w && self->ring_h == h && self->ring[0]) {
+  if (self->ring[0] && self->ring_w == w && self->ring_h == h) {
     return TRUE;
+  }
+  if (self->viewport) {
+    if (self->ring[0] && w <= self->ring_w && h <= self->ring_h) {
+      return TRUE;  // frame fits the existing buffers; crop presents it
+    }
+    // Grow-only: never shrink an axis, round the growing axis up.
+    w = hdr_round_up_dim(MAX(w, self->ring_w));
+    h = hdr_round_up_dim(MAX(h, self->ring_h));
   }
   // Size changed: retire in-flight buffers (freed on release, in the sweep),
   // free idle ones now. A slot the main thread is about to commit (busy, set by
@@ -1303,6 +1343,11 @@ static gboolean fl_compositor_hdr_present_layers(FlCompositor* compositor,
     return TRUE;  // all in flight; drop this frame (backpressure)
   }
   HdrBuffer* b = self->ring[slot];
+  // Content dims for render()'s viewport source rect + damage (the buffer
+  // may be larger — grow-only ring). Published to the main thread by the
+  // pending_slot store below.
+  b->content_w = w;
+  b->content_h = h;
 
   // Composite: draw the layers into the bo-backed FBO (Y-flip +
   // reference/max scale). Blit fallback (base layer only) if the program
@@ -1331,6 +1376,9 @@ static gboolean fl_compositor_hdr_present_layers(FlCompositor* compositor,
   g_mutex_lock(&self->mutex);
   self->pending_slot = slot;
   g_mutex_unlock(&self->mutex);
+  // Wake render() if it is blocked in the synchronized-resize wait — this
+  // frame may be the matching-size one it needs (stock parity).
+  fl_task_runner_stop_wait(self->task_runner);
   return TRUE;
 }
 
@@ -1351,6 +1399,43 @@ static gboolean fl_compositor_hdr_render(FlCompositor* compositor,
   GtkAllocation alloc;
   gtk_widget_get_allocation(self->widget, &alloc);
 
+  // Synchronized resize (stock FlCompositorOpenGL parity): when the widget
+  // size changed, wait for the raster thread to deliver a frame at the NEW
+  // size before committing — otherwise the previous frame gets
+  // viewport-scaled to the new geometry and content visibly trails the frame
+  // through an interactive resize. fl_task_runner_wait keeps the engine's
+  // platform tasks running while blocked (the UI isolate shares this
+  // thread), which is exactly what lets the new-size frame get built during
+  // the wait; present_layers calls fl_task_runner_stop_wait on every
+  // publish. Not synchronized until the first commit (startup), and capped —
+  // unlike stock's unbounded wait — so a stalled engine degrades to a
+  // scaled frame instead of a frozen window.
+  if (self->committed_once && alloc.width > 0 && alloc.height > 0) {
+    size_t want_w = (size_t)alloc.width * (scale > 0 ? scale : 1);
+    size_t want_h = (size_t)alloc.height * (scale > 0 ? scale : 1);
+    if ((self->last_content_w != want_w || self->last_content_h != want_h) &&
+        !(self->wait_failed_w == want_w && self->wait_failed_h == want_h)) {
+      gint64 deadline = g_get_monotonic_time() + 500 * G_TIME_SPAN_MILLISECOND;
+      gboolean match = FALSE;
+      while (!match && g_get_monotonic_time() < deadline) {
+        g_mutex_lock(&self->mutex);
+        int p = self->pending_slot;
+        match = p >= 0 && self->ring[p] && self->ring[p]->content_w == want_w &&
+                self->ring[p]->content_h == want_h;
+        g_mutex_unlock(&self->mutex);
+        if (!match) {
+          fl_task_runner_wait(self->task_runner);
+        }
+      }
+      if (match) {
+        self->wait_failed_w = self->wait_failed_h = 0;
+      } else {
+        self->wait_failed_w = want_w;
+        self->wait_failed_h = want_h;
+      }
+    }
+  }
+
   // Commit the slot present_layers drew, here on the main thread — exactly
   // once per parent-surface commit (GDK issues the parent commit right after
   // this draw returns). In sync mode the subsurface's new buffer latches
@@ -1369,14 +1454,23 @@ static gboolean fl_compositor_hdr_render(FlCompositor* compositor,
   if (b && b->buffer) {
     wl_subsurface_set_position(self->subsurface, ox, oy);
     if (self->viewport && alloc.width > 0 && alloc.height > 0) {
+      // Present only the top-left content region: the grow-only ring keeps
+      // buffers at their high-water size, so the frame may occupy a sub-rect.
+      wp_viewport_set_source(self->viewport, wl_fixed_from_int(0),
+                             wl_fixed_from_int(0),
+                             wl_fixed_from_int((int)b->content_w),
+                             wl_fixed_from_int((int)b->content_h));
       wp_viewport_set_destination(self->viewport, alloc.width, alloc.height);
     } else {
       wl_surface_set_buffer_scale(self->surface, scale > 0 ? scale : 1);
     }
     wl_surface_attach(self->surface, b->buffer, 0, 0);
-    wl_surface_damage_buffer(self->surface, 0, 0, b->w, b->h);
+    wl_surface_damage_buffer(self->surface, 0, 0, b->content_w, b->content_h);
     wl_surface_commit(self->surface);
     wl_display_flush(self->display);
+    self->last_content_w = b->content_w;
+    self->last_content_h = b->content_h;
+    self->committed_once = TRUE;
   }
 
   // The render area is GL-backed; a cairo CLEAR may not actually wipe the GL
