@@ -96,8 +96,10 @@ void fl_view_set_background_color(FlView* view, const GdkRGBA* color);
  * maximum luminance divided by its reference (SDR white) luminance, read live
  * from the Wayland color-management protocol. 1.0 when the display (or the
  * session's presentation path) is SDR-only. Plugins rendering HDR content can
- * poll this to drive tone mapping — the Linux analog of macOS's
- * NSScreen.maximumExtendedDynamicRangeColorComponentValue. Thread-safe.
+ * read this to drive tone mapping — the Linux analog of macOS's
+ * NSScreen.maximumExtendedDynamicRangeColorComponentValue. Thread-safe. The
+ * view emits "display-headroom-changed" (no arguments, main thread) when the
+ * value changes, so consumers can re-render instead of polling.
  *
  * Returns: the headroom multiplier (>= 1.0).
  */

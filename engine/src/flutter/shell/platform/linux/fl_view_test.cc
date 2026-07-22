@@ -40,6 +40,18 @@ TEST(FlViewTest, DisplayHeadroomDefaultsToSdr) {
   EXPECT_EQ(fl_view_get_display_headroom(view), 1.0);
 }
 
+// The headroom-change notification consumers discover at runtime with
+// g_signal_lookup (they build against stock headers, where the signal
+// doesn't exist) is registered on the view type.
+TEST(FlViewTest, DisplayHeadroomChangedSignalRegistered) {
+  flutter::testing::fl_ensure_gtk_init();
+  g_autoptr(FlDartProject) project = fl_dart_project_new();
+  FlView* view = fl_view_new(project);
+
+  EXPECT_NE(g_signal_lookup("display-headroom-changed", G_OBJECT_TYPE(view)),
+            0u);
+}
+
 TEST(FlViewTest, StateUpdateDoesNotHappenInInit) {
   flutter::testing::fl_ensure_gtk_init();
   g_autoptr(FlDartProject) project = fl_dart_project_new();

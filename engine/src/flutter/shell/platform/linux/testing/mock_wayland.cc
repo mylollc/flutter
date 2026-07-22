@@ -44,6 +44,8 @@ MOCK_WL_INTERFACE(wl_subcompositor_interface);
 MOCK_WL_INTERFACE(wl_subsurface_interface);
 MOCK_WL_INTERFACE(wl_surface_interface);
 
+void wl_display_cancel_read(void* display) {}
+
 void* wl_display_create_queue(void* display) {
   return nullptr;
 }
@@ -53,6 +55,10 @@ int wl_display_dispatch_queue_pending(void* display, void* queue) {
 }
 
 int wl_display_flush(void* display) {
+  return 0;
+}
+
+int wl_display_prepare_read_queue(void* display, void* queue) {
   return 0;
 }
 

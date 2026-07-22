@@ -126,11 +126,26 @@ struct _FlCompositorHDR {
   uint32_t out_min_lum;  // units of 0.0001 cd/m2 (protocol encoding)
   uint32_t out_max_lum;  // cd/m2
   uint32_t out_ref_lum;  // cd/m2
-  float present_scale;   // reference/max; 1.0 until known
+  // reference/max; 1.0 until known. Stored as float bits: written by
+  // info_done (raster present dispatch OR the main-thread dispatch tick),
+  // read by the raster draw — hence atomic.
+  gint present_scale_bits;
 
   // max/reference in thousandths, read cross-thread (plugins poll it via
   // fl_view_get_display_headroom to drive HDR tone mapping) — hence atomic.
   gint headroom_milli;
+
+  // A "headroom-changed" emission is queued on the main thread (guarded by
+  // mutex; coalesces bursts of output-description reads into one emission).
+  gboolean headroom_notify_pending;
+
+  // Serializes dispatch of the private queue between the raster thread
+  // (present) and the main-loop source, so the Wayland listeners never run
+  // concurrently with themselves.
+  GMutex dispatch_mutex;
+  // Main-loop source that dispatches the private queue while no frames
+  // present (see HdrQueueSource). 0 once removed.
+  guint queue_source_id;
 
   // In-flight read of the current output's image description (a get_
   // image_description → ready → get_information → …events… → done chain,
@@ -181,6 +196,23 @@ struct _FlCompositorHDR {
 };
 
 G_DEFINE_TYPE(FlCompositorHDR, fl_compositor_hdr, fl_compositor_get_type())
+
+enum { SIGNAL_HEADROOM_CHANGED, LAST_SIGNAL };
+
+static guint fl_compositor_hdr_signals[LAST_SIGNAL];
+
+static float hdr_get_present_scale(FlCompositorHDR* self) {
+  gint bits = g_atomic_int_get(&self->present_scale_bits);
+  float value;
+  memcpy(&value, &bits, sizeof(value));
+  return value;
+}
+
+static void hdr_set_present_scale(FlCompositorHDR* self, float value) {
+  gint bits;
+  memcpy(&bits, &value, sizeof(bits));
+  g_atomic_int_set(&self->present_scale_bits, bits);
+}
 
 static void hdr_start_output_read(FlCompositorHDR* self);
 static void hdr_retag_surface(FlCompositorHDR* self);
@@ -434,6 +466,38 @@ static void desc_ready2(void* data,
 static const struct wp_image_description_v1_listener desc_listener = {
     desc_failed, desc_ready, desc_ready2};
 
+// Main-thread half of the headroom-change notification: emit the signal so
+// FlView (and through it, application code) can react — e.g. re-render HDR
+// content tone-mapped to the new headroom. Consumers read the new value via
+// fl_compositor_hdr_get_display_headroom.
+static gboolean headroom_notify_idle(gpointer data) {
+  FlCompositorHDR* self = FL_COMPOSITOR_HDR(data);
+  g_mutex_lock(&self->mutex);
+  self->headroom_notify_pending = FALSE;
+  gboolean disposed = self->disposed;
+  g_mutex_unlock(&self->mutex);
+  if (!disposed) {
+    g_signal_emit(self, fl_compositor_hdr_signals[SIGNAL_HEADROOM_CHANGED], 0);
+  }
+  g_object_unref(self);
+  return G_SOURCE_REMOVE;
+}
+
+// Raster-thread half: the output-description read runs on the private queue
+// dispatched during present, so hop to the main thread (holding a ref) to
+// emit. Coalesces — at most one emission is in flight at a time.
+static void hdr_schedule_headroom_notify(FlCompositorHDR* self) {
+  g_mutex_lock(&self->mutex);
+  gboolean skip = self->headroom_notify_pending || self->disposed;
+  if (!skip) {
+    self->headroom_notify_pending = TRUE;
+  }
+  g_mutex_unlock(&self->mutex);
+  if (!skip) {
+    g_idle_add(headroom_notify_idle, g_object_ref(self));
+  }
+}
+
 // End of an output-description read: adopt the values, rescale, retag.
 static void info_done(void* data, struct wp_image_description_info_v1* info) {
   FlCompositorHDR* self = FL_COMPOSITOR_HDR(data);
@@ -454,22 +518,29 @@ static void info_done(void* data, struct wp_image_description_info_v1* info) {
     self->out_min_lum = self->pend_min_lum;
     self->out_max_lum = self->pend_max_lum;
     self->out_ref_lum = self->pend_ref_lum;
-    self->present_scale = (float)self->out_ref_lum / (float)self->out_max_lum;
-    g_atomic_int_set(&self->headroom_milli,
-                     (gint)((1000.0 * self->out_max_lum) / self->out_ref_lum));
+    float present_scale = (float)self->out_ref_lum / (float)self->out_max_lum;
+    hdr_set_present_scale(self, present_scale);
+    gint headroom_milli =
+        (gint)((1000.0 * self->out_max_lum) / self->out_ref_lum);
+    gboolean headroom_changed =
+        headroom_milli != g_atomic_int_get(&self->headroom_milli);
+    g_atomic_int_set(&self->headroom_milli, headroom_milli);
+    if (headroom_changed) {
+      hdr_schedule_headroom_notify(self);
+    }
     if (changed) {
       g_debug(
           "FlCompositorHDR: output luminances min=%.4f max=%u ref=%u cd/m2 "
           "(headroom %.2fx, present scale %.4f)",
           self->out_min_lum / 1e4, self->out_max_lum, self->out_ref_lum,
-          (double)self->out_max_lum / self->out_ref_lum, self->present_scale);
+          (double)self->out_max_lum / self->out_ref_lum, present_scale);
       hdr_retag_surface(self);
     }
   } else {
     g_warning(
         "FlCompositorHDR: output image description carried no luminances; "
         "keeping previous values (scale %.4f)",
-        self->present_scale);
+        hdr_get_present_scale(self));
   }
 
   if (self->reread_needed) {
@@ -1067,7 +1138,7 @@ static void hdr_present_draw(FlCompositorHDR* self,
   glViewport(0, 0, w, h);
 
   glUseProgram(self->program);
-  glUniform1f(self->scale_location, self->present_scale);
+  glUniform1f(self->scale_location, hdr_get_present_scale(self));
 
   glBindSampler(0, 0);  // texture-object params (NEAREST), not a sampler's
 
@@ -1206,7 +1277,10 @@ static gboolean fl_compositor_hdr_present_layers(FlCompositor* compositor,
 
   // Drain buffer releases + color-management events (output luminance
   // changes, surface enter, description ready) — all on our private queue.
+  // dispatch_mutex: the main-thread tick dispatches the same queue.
+  g_mutex_lock(&self->dispatch_mutex);
   wl_display_dispatch_queue_pending(self->display, self->queue);
+  g_mutex_unlock(&self->dispatch_mutex);
   hdr_sweep_retired(self);
   if (!hdr_ring_ensure(self, w, h)) {
     return TRUE;
@@ -1394,7 +1468,7 @@ static gboolean hdr_setup(FlCompositorHDR* self) {
     self->out_min_lum = 2000;  // 0.2 cd/m2
     self->out_max_lum = 203;
     self->out_ref_lum = 203;
-    self->present_scale = 1.0f;
+    hdr_set_present_scale(self, 1.0f);
   }
 
   self->surface = wl_compositor_create_surface(self->comp);
@@ -1455,6 +1529,14 @@ static void fl_compositor_hdr_dispose(GObject* object) {
   g_mutex_lock(&self->mutex);
   self->disposed = TRUE;
   g_mutex_unlock(&self->mutex);
+
+  // Remove the queue source before the queue it dispatches is destroyed
+  // (the source and dispose both run on the main thread, so no callback is
+  // in flight).
+  if (self->queue_source_id != 0) {
+    g_source_remove(self->queue_source_id);
+    self->queue_source_id = 0;
+  }
 
   gboolean have_gl = self->opengl_manager != nullptr &&
                      fl_opengl_manager_make_current(self->opengl_manager);
@@ -1536,6 +1618,7 @@ static void fl_compositor_hdr_dispose(GObject* object) {
   g_clear_object(&self->task_runner);
   g_clear_object(&self->opengl_manager);
   g_mutex_clear(&self->mutex);
+  g_mutex_clear(&self->dispatch_mutex);
 
   G_OBJECT_CLASS(fl_compositor_hdr_parent_class)->dispose(object);
 }
@@ -1544,13 +1627,22 @@ static void fl_compositor_hdr_class_init(FlCompositorHDRClass* klass) {
   FL_COMPOSITOR_CLASS(klass)->present_layers = fl_compositor_hdr_present_layers;
   FL_COMPOSITOR_CLASS(klass)->render = fl_compositor_hdr_render;
   G_OBJECT_CLASS(klass)->dispose = fl_compositor_hdr_dispose;
+
+  // Emitted on the main thread when the display EDR headroom changes (the
+  // output's image description delivered new luminances — HDR toggled,
+  // window moved to a different output, compositor retargeted). Read the
+  // new value with fl_compositor_hdr_get_display_headroom.
+  fl_compositor_hdr_signals[SIGNAL_HEADROOM_CHANGED] = g_signal_new(
+      "headroom-changed", fl_compositor_hdr_get_type(), G_SIGNAL_RUN_LAST, 0,
+      nullptr, nullptr, nullptr, G_TYPE_NONE, 0);
 }
 
 static void fl_compositor_hdr_init(FlCompositorHDR* self) {
   g_mutex_init(&self->mutex);
+  g_mutex_init(&self->dispatch_mutex);
   self->drm_fd = -1;
   self->pending_slot = -1;
-  self->present_scale = 1.0f;
+  hdr_set_present_scale(self, 1.0f);
   self->headroom_milli = 1000;  // 1.0x = SDR until the output is read
   self->outputs = g_ptr_array_new_with_free_func(hdr_output_free);
 }
@@ -1559,6 +1651,62 @@ double fl_compositor_hdr_get_display_headroom(FlCompositorHDR* self) {
   g_return_val_if_fail(FL_IS_COMPOSITOR_HDR(self), 1.0);
   return g_atomic_int_get(&self->headroom_milli) / 1000.0;
 }
+
+// Main-loop dispatch of the private queue while no frames present. Events
+// (an output's image description changing when HDR is toggled, buffer
+// releases) land on the queue whenever the display socket is read — GDK's
+// event source polls that fd and reads continuously — but they sit there
+// until DISPATCHED, which otherwise only happens inside present_layers: a
+// fully idle app would never see an ambient headroom change.
+//
+// This source is event-driven with no fd of its own: the queue's only
+// producer is a socket read, and every socket read is preceded by a
+// main-loop wake (GDK's poll on the display fd), so probing the queue at the
+// top of each loop iteration cannot miss — events cannot arrive without a
+// wake. The probe is wl_display_prepare_read_queue used purely as an
+// emptiness test: nonzero means events are pending (dispatch); zero means
+// the queue is empty and we were registered as a socket reader, which we
+// cancel before returning. The register + cancel both happen inside
+// prepare() — holding reader registration across the poll would deadlock
+// GDK's wl_display_read_events, which waits for ALL registered readers.
+typedef struct {
+  GSource parent;
+  FlCompositorHDR* self;  // borrowed; the source is removed in dispose
+} HdrQueueSource;
+
+static gboolean hdr_queue_source_prepare(GSource* source, gint* timeout) {
+  HdrQueueSource* s = reinterpret_cast<HdrQueueSource*>(source);
+  *timeout = -1;
+  if (wl_display_prepare_read_queue(s->self->display, s->self->queue) != 0) {
+    return TRUE;  // events pending on our queue
+  }
+  wl_display_cancel_read(s->self->display);
+  return FALSE;
+}
+
+static gboolean hdr_queue_source_check(GSource* source) {
+  return FALSE;  // no fds; prepare() is the only trigger
+}
+
+static gboolean hdr_queue_source_dispatch(GSource* source,
+                                          GSourceFunc callback,
+                                          gpointer user_data) {
+  HdrQueueSource* s = reinterpret_cast<HdrQueueSource*>(source);
+  FlCompositorHDR* self = s->self;
+  g_mutex_lock(&self->dispatch_mutex);
+  wl_display_dispatch_queue_pending(self->display, self->queue);
+  g_mutex_unlock(&self->dispatch_mutex);
+  return G_SOURCE_CONTINUE;
+}
+
+static GSourceFuncs hdr_queue_source_funcs = {
+    hdr_queue_source_prepare,
+    hdr_queue_source_check,
+    hdr_queue_source_dispatch,
+    nullptr,
+    nullptr,
+    nullptr,
+};
 
 FlCompositorHDR* fl_compositor_hdr_new(FlTaskRunner* task_runner,
                                        FlOpenGLManager* opengl_manager,
@@ -1577,5 +1725,11 @@ FlCompositorHDR* fl_compositor_hdr_new(FlTaskRunner* task_runner,
     g_object_unref(self);
     return nullptr;
   }
+  GSource* queue_source =
+      g_source_new(&hdr_queue_source_funcs, sizeof(HdrQueueSource));
+  reinterpret_cast<HdrQueueSource*>(queue_source)->self = self;
+  g_source_set_name(queue_source, "FlCompositorHDR Wayland queue");
+  self->queue_source_id = g_source_attach(queue_source, nullptr);
+  g_source_unref(queue_source);
   return self;
 }

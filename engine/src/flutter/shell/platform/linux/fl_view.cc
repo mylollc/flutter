@@ -83,7 +83,7 @@ struct _FlView {
   GCancellable* cancellable;
 };
 
-enum { SIGNAL_FIRST_FRAME, LAST_SIGNAL };
+enum { SIGNAL_FIRST_FRAME, SIGNAL_DISPLAY_HEADROOM_CHANGED, LAST_SIGNAL };
 
 static guint fl_view_signals[LAST_SIGNAL];
 
@@ -432,6 +432,12 @@ static void gesture_zoom_end_cb(FlView* self) {
   fl_scrolling_manager_handle_zoom_end(self->scrolling_manager);
 }
 
+// The HDR compositor's headroom changed (main thread, G_CONNECT_SWAPPED puts
+// the view first): re-emit as the view-level signal.
+static void compositor_headroom_changed_cb(FlView* self) {
+  g_signal_emit(self, fl_view_signals[SIGNAL_DISPLAY_HEADROOM_CHANGED], 0);
+}
+
 static void setup_opengl(FlView* self) {
   g_autoptr(GError) error = nullptr;
 
@@ -465,6 +471,11 @@ static void setup_opengl(FlView* self) {
                               GTK_WIDGET(self->render_area));
     if (hdr != nullptr) {
       self->compositor = FL_COMPOSITOR(hdr);
+      // Relay the compositor's headroom change (already on the main thread)
+      // as the view-level signal application code connects to.
+      g_signal_connect_object(hdr, "headroom-changed",
+                              G_CALLBACK(compositor_headroom_changed_cb), self,
+                              G_CONNECT_SWAPPED);
       // F16 end-to-end: Skia composites into linear-scRGB F16 backing stores
       // (1.0 = SDR white, HDR highlights above), which the HDR compositor
       // scales by reference/max luminance and presents on the extended-linear
@@ -701,6 +712,14 @@ static void fl_view_class_init(FlViewClass* klass) {
   fl_view_signals[SIGNAL_FIRST_FRAME] =
       g_signal_new("first-frame", fl_view_get_type(), G_SIGNAL_RUN_LAST, 0,
                    NULL, NULL, NULL, G_TYPE_NONE, 0);
+
+  // Emitted on the main thread when fl_view_get_display_headroom's value
+  // changes (HDR toggled on the output, window moved between displays).
+  // Never emitted on the stock compositor path, where headroom is fixed at
+  // 1.0 — consumers detect availability with g_signal_lookup.
+  fl_view_signals[SIGNAL_DISPLAY_HEADROOM_CHANGED] =
+      g_signal_new("display-headroom-changed", fl_view_get_type(),
+                   G_SIGNAL_RUN_LAST, 0, NULL, NULL, NULL, G_TYPE_NONE, 0);
 
   gtk_widget_class_set_accessible_type(GTK_WIDGET_CLASS(klass),
                                        fl_socket_accessible_get_type());
