@@ -704,7 +704,17 @@ static void hdr_buffer_free(HdrBuffer* b, gboolean have_gl) {
     }
   }
   if (b->image != EGL_NO_IMAGE_KHR) {
-    eglDestroyImageKHR(b->dpy, b->image);
+    // Don't call eglDestroyImageKHR through epoxy: epoxy resolves EGL
+    // extension symbols against the current display, and the window-close
+    // dispose path has none, so its dispatch would abort(). A raw
+    // eglGetProcAddress pointer (core EGL, resolvable with no display)
+    // only needs b->dpy to be valid.
+    PFNEGLDESTROYIMAGEKHRPROC destroy_image =
+        reinterpret_cast<PFNEGLDESTROYIMAGEKHRPROC>(
+            eglGetProcAddress("eglDestroyImageKHR"));
+    if (destroy_image != nullptr) {
+      destroy_image(b->dpy, b->image);
+    }
   }
   if (b->buffer) {
     wl_buffer_destroy(b->buffer);
@@ -1632,8 +1642,13 @@ static void fl_compositor_hdr_dispose(GObject* object) {
     self->queue_source_id = 0;
   }
 
+  // Trusting make_current alone is not enough: on a window already being
+  // destroyed it can report success without a context actually current, and
+  // epoxy's gl* dispatch abort()s on the first call. eglGetCurrentContext is
+  // core EGL, safe to call with no context current.
   gboolean have_gl = self->opengl_manager != nullptr &&
-                     fl_opengl_manager_make_current(self->opengl_manager);
+                     fl_opengl_manager_make_current(self->opengl_manager) &&
+                     eglGetCurrentContext() != EGL_NO_CONTEXT;
   for (int i = 0; i < HDR_RING; i++) {
     hdr_buffer_free(self->ring[i], have_gl);
     self->ring[i] = nullptr;
