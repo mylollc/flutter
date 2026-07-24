@@ -59,7 +59,8 @@ G_DECLARE_DERIVABLE_TYPE(FlTextureGL, fl_texture_gl, FL, TEXTURE_GL, GObject)
  *     }
  *
  *     // For example, we render pixel buffer here.
- *     // Note that Flutter only accepts textures in GL_RGBA8 format.
+ *     // Textures are treated as GL_RGBA8 unless a different format is
+ *     // declared with fl_texture_gl_set_format().
  *     static char buffer[] = { 0x1f, 0x2f, 0x3f, 0x4f };  // 1x1 pixel.
  *     glTexImage2D (GL_TEXTURE_2D, 0, GL_RGBA8, 1, 1, 0, GL_RGBA,
  *                   GL_UNSIGNED_BYTE, buffer);
@@ -105,6 +106,20 @@ struct _FlTextureGLClass {
                        uint32_t* height,
                        GError** error);
 };
+
+/**
+ * fl_texture_gl_set_format:
+ * @texture: an #FlTextureGL.
+ * @format: GL sized internal format of the texture #populate provides,
+ *   e.g. GL_RGBA8 (the default) or GL_RGBA16F.
+ *
+ * Declares the pixel format of this texture so the engine samples it at
+ * full precision. Textures default to GL_RGBA8; a provider whose texture
+ * carries HDR / wide-gamut content in half-float should set GL_RGBA16F
+ * (typically once, before the first frame that uses the texture) so values
+ * above 1.0 survive compositing.
+ */
+void fl_texture_gl_set_format(FlTextureGL* texture, uint32_t format);
 
 G_END_DECLS
 

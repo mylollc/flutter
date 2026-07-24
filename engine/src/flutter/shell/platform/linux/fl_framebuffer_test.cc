@@ -61,6 +61,29 @@ TEST(FlFramebufferTest, ResourcesRetainedWithoutContext) {
   g_object_unref(framebuffer);
 }
 
+// F16 (HDR) backing stores allocate as sized GL_RGBA16F with GL_HALF_FLOAT
+// pixel-transfer type — GL_RGBA16F is a sized internal format and cannot
+// double as the transfer format the way GL_RGBA does on the 8-bit path.
+TEST(FlFramebufferTest, F16Allocation) {
+  ::testing::NiceMock<flutter::testing::MockEpoxy> epoxy;
+
+  EXPECT_CALL(epoxy, glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, 100, 100, 0,
+                                  GL_RGBA, GL_HALF_FLOAT, nullptr));
+  g_autoptr(FlFramebuffer) framebuffer =
+      fl_framebuffer_new(GL_RGBA16F, 100, 100, FALSE);
+}
+
+// The 8-bit path is unchanged by the F16 support: unsized format doubles as
+// the transfer format with GL_UNSIGNED_BYTE.
+TEST(FlFramebufferTest, Rgba8Allocation) {
+  ::testing::NiceMock<flutter::testing::MockEpoxy> epoxy;
+
+  EXPECT_CALL(epoxy, glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 100, 100, 0,
+                                  GL_RGBA, GL_UNSIGNED_BYTE, nullptr));
+  g_autoptr(FlFramebuffer) framebuffer =
+      fl_framebuffer_new(GL_RGBA, 100, 100, FALSE);
+}
+
 TEST(FlFramebufferTest, Sibling) {
   ::testing::NiceMock<flutter::testing::MockEpoxy> epoxy;
 

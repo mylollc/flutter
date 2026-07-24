@@ -21,7 +21,8 @@ G_DECLARE_FINAL_TYPE(FlFramebuffer, fl_framebuffer, FL, FRAMEBUFFER, GObject)
 
 /**
  * fl_framebuffer_new:
- * @format: format, e.g. GL_RGB, GL_BGR
+ * @format: format, e.g. GL_RGBA, GL_BGRA_EXT, or GL_RGBA16F (F16 HDR
+ * backing stores)
  * @width: width of texture.
  * @height: height of texture.
  * @shareable: %TRUE if this framebuffer can be shared between contexts

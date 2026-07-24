@@ -11,6 +11,13 @@
 
 typedef struct {
   int64_t id;
+
+  // GL sized internal format reported to the engine compositor
+  // (FlutterOpenGLTexture.format). GL_RGBA8 by default; an HDR texture
+  // provider sets GL_RGBA16F via fl_texture_gl_set_format() so Skia wraps
+  // the texture as kRGBA_F16 with a linear color space instead of clamping
+  // it through an 8-bit read.
+  uint32_t format;
 } FlTextureGLPrivate;
 
 static void fl_texture_gl_texture_iface_init(FlTextureInterface* iface);
@@ -45,7 +52,19 @@ static void fl_texture_gl_texture_iface_init(FlTextureInterface* iface) {
 
 static void fl_texture_gl_class_init(FlTextureGLClass* klass) {}
 
-static void fl_texture_gl_init(FlTextureGL* self) {}
+static void fl_texture_gl_init(FlTextureGL* self) {
+  FlTextureGLPrivate* priv = reinterpret_cast<FlTextureGLPrivate*>(
+      fl_texture_gl_get_instance_private(self));
+  priv->format = GL_RGBA8;
+}
+
+G_MODULE_EXPORT void fl_texture_gl_set_format(FlTextureGL* self,
+                                              uint32_t format) {
+  g_return_if_fail(FL_IS_TEXTURE_GL(self));
+  FlTextureGLPrivate* priv = reinterpret_cast<FlTextureGLPrivate*>(
+      fl_texture_gl_get_instance_private(self));
+  priv->format = format;
+}
 
 gboolean fl_texture_gl_populate(FlTextureGL* self,
                                 uint32_t width,
@@ -58,9 +77,11 @@ gboolean fl_texture_gl_populate(FlTextureGL* self,
     return FALSE;
   }
 
+  FlTextureGLPrivate* priv = reinterpret_cast<FlTextureGLPrivate*>(
+      fl_texture_gl_get_instance_private(self));
   opengl_texture->target = target;
   opengl_texture->name = name;
-  opengl_texture->format = GL_RGBA8;
+  opengl_texture->format = priv->format;
   opengl_texture->destruction_callback = nullptr;
   opengl_texture->user_data = nullptr;
   opengl_texture->width = width;
