@@ -89,6 +89,25 @@ int64_t fl_view_get_id(FlView* view);
 void fl_view_set_background_color(FlView* view, const GdkRGBA* color);
 
 /**
+ * fl_view_set_hdr_enabled:
+ * @view: an #FlView.
+ * @enable: %TRUE to request HDR presentation.
+ *
+ * Requests HDR presentation for this view. Must be called before the view is
+ * realized. When enabled and the platform can provide it (a Wayland session
+ * whose compositor supports the color-management protocol), the view renders
+ * into linear half-float (scRGB) surfaces presented with extended dynamic
+ * range: 1.0 stays SDR white and values above it use the display's HDR
+ * headroom (see fl_view_get_display_headroom). When the platform cannot
+ * provide it, presentation falls back to the standard SDR path.
+ *
+ * Off by default: HDR presentation doubles the view's backing-store memory
+ * (half-float instead of 8-bit), which only pays off for applications that
+ * render HDR content.
+ */
+void fl_view_set_hdr_enabled(FlView* view, gboolean enable);
+
+/**
  * fl_view_get_display_headroom:
  * @view: an #FlView.
  *

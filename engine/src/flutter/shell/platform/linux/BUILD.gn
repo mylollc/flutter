@@ -81,7 +81,7 @@ config("disable_warnings") {
   cflags_cc = warning_flags
 }
 
-# OLYM Phase-6 Linux HDR: the GTK3 embedder speaks the linux-dmabuf +
+# HDR presentation: the GTK embedder speaks the linux-dmabuf +
 # color-management Wayland protocols directly (fl_compositor_hdr.cc), which need
 # wayland-client >= 1.20 (wl_proxy_marshal_flags). The pinned bullseye sysroot
 # ships wayland 1.18, so we vendor the wayland 1.20.0 client headers + generated
@@ -97,7 +97,7 @@ config("wayland_vendor") {
   include_dirs = [ "wayland_vendor" ]
 }
 
-# OLYM Phase-6 Linux HDR: relax the global -Wl,-z,defs for the embedder .so so
+# HDR presentation: relax the global -Wl,-z,defs for the embedder .so so
 # the wayland-client symbols fl_compositor_hdr.cc references (wl_proxy_marshal_flags
 # etc.) may stay undefined at link and resolve at runtime from the system
 # libwayland-client.so.0 GTK loads. Applied as an APPENDED config so -z,undefs is
@@ -151,7 +151,7 @@ source_set("flutter_linux_sources") {
     "fl_compositor_opengl.cc",
     "fl_compositor_software.cc",
 
-    # OLYM Phase-6 Linux HDR: vendored Wayland protocol stubs (see the
+    # HDR presentation: vendored Wayland protocol stubs (see the
     # wayland_vendor config above). Core wl_compositor/wl_subcompositor/wl_shm
     # come from wayland-client; these are the non-core protocols.
     "wayland_vendor/color-management-v1-protocol.c",
@@ -268,6 +268,7 @@ executable("flutter_linux_unittests") {
     "fl_basic_message_channel_test.cc",
     "fl_binary_codec_test.cc",
     "fl_binary_messenger_test.cc",
+    "fl_compositor_hdr_test.cc",
     "fl_compositor_opengl_test.cc",
     "fl_compositor_software_test.cc",
     "fl_dart_project_test.cc",
@@ -354,7 +355,7 @@ shared_library("flutter_linux_gtk") {
 
   ldflags = [ "-Wl,-rpath,\$ORIGIN" ]
 
-  # OLYM Phase-6 Linux HDR: appended so its -Wl,-z,undefs comes after the
+  # HDR presentation: appended so its -Wl,-z,undefs comes after the
   # default -Wl,-z,defs (the wayland symbols resolve at runtime — see the config).
   configs += [ ":allow_undefined_symbols" ]
 

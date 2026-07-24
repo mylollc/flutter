@@ -45,8 +45,8 @@
 // the target). The present is now a shader draw, which is expected to land
 // where blits didn't (as glClear does). If the loading-screen stale-slot
 // flicker ever reappears, the draw path did NOT lift the limit — drop this
-// back to 2 and investigate (Mesa-iris bug vs our EGLImage/FBO setup is still
-// an open question, see docs/platform/LINUX_VULKAN_HDR_PLAN.md).
+// back to 2 and investigate (a Mesa-iris bug vs. this EGLImage/FBO setup is
+// still an open question).
 #define HDR_RING 3
 
 // A single dma-buf slot: a GBM bo rendered into via an EGLImage-backed FBO, and

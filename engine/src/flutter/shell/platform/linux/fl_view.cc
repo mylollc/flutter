@@ -81,6 +81,12 @@ struct _FlView {
   guint cursor_changed_cb_id;
 
   GCancellable* cancellable;
+
+  // HDR presentation was requested with fl_view_set_hdr_enabled before
+  // realize. Off by default: the HDR compositor switches the whole view to
+  // F16 backing stores (double the backing-store memory), which only pays
+  // off for applications that actually render HDR content.
+  gboolean hdr_enabled;
 };
 
 enum { SIGNAL_FIRST_FRAME, SIGNAL_DISPLAY_HEADROOM_CHANGED, LAST_SIGNAL };
@@ -459,12 +465,12 @@ static void setup_opengl(FlView* self) {
   gboolean shareable =
       GDK_IS_WAYLAND_DISPLAY(gtk_widget_get_display(GTK_WIDGET(self)));
 
-  // HDR presentation: on Wayland, present via an engine-owned
-  // wl_subsurface (GPU-resident dma-buf). fl_compositor_hdr_new returns NULL if
-  // the session isn't Wayland or the required globals are missing, in which
-  // case we fall back to the OpenGL/GDK compositor (X11 / no-CM path
-  // untouched).
-  if (shareable) {
+  // HDR presentation (opt-in via fl_view_set_hdr_enabled): on Wayland,
+  // present via an engine-owned wl_subsurface (GPU-resident dma-buf).
+  // fl_compositor_hdr_new returns NULL if the session isn't Wayland or the
+  // required globals are missing, in which case we fall back to the
+  // OpenGL/GDK compositor (X11 / no-CM path untouched).
+  if (shareable && self->hdr_enabled) {
     FlCompositorHDR* hdr =
         fl_compositor_hdr_new(fl_engine_get_task_runner(self->engine),
                               fl_engine_get_opengl_manager(self->engine),
@@ -848,6 +854,17 @@ G_MODULE_EXPORT void fl_view_set_background_color(FlView* self,
   g_return_if_fail(FL_IS_VIEW(self));
   gdk_rgba_free(self->background_color);
   self->background_color = gdk_rgba_copy(color);
+}
+
+G_MODULE_EXPORT void fl_view_set_hdr_enabled(FlView* self, gboolean enable) {
+  g_return_if_fail(FL_IS_VIEW(self));
+  if (self->compositor != nullptr) {
+    g_warning(
+        "fl_view_set_hdr_enabled: must be called before the view is "
+        "realized; ignored");
+    return;
+  }
+  self->hdr_enabled = enable;
 }
 
 G_MODULE_EXPORT double fl_view_get_display_headroom(FlView* self) {

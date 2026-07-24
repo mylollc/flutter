@@ -29,10 +29,11 @@ G_BEGIN_DECLS
 // SDR-brightness slider, monitor moves). Present + all Wayland event handling
 // run on the engine raster thread via a dedicated wl_event_queue; GDK's normal
 // redraw commits the parent so the (sync-mode) subsurface latches with it.
-// Selected by fl_view when the session is Wayland and wp_color_manager_v1 (with
-// parametric/set_luminances/ext_linear capabilities) is present; otherwise
-// fl_view falls back to FlCompositorOpenGL and the (X11 / no-CM) 8-bit path
-// is untouched.
+// Selected by fl_view when the application requested HDR
+// (fl_view_set_hdr_enabled), the session is Wayland, and wp_color_manager_v1
+// (with parametric/set_luminances/ext_linear capabilities) is present;
+// otherwise fl_view falls back to FlCompositorOpenGL and the (X11 / no-CM)
+// 8-bit path is untouched.
 
 G_DECLARE_FINAL_TYPE(FlCompositorHDR,
                      fl_compositor_hdr,
