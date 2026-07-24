@@ -92,8 +92,16 @@ FlFramebuffer* fl_framebuffer_new(GLint format,
   glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
   glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
-  glTexImage2D(GL_TEXTURE_2D, 0, format, width, height, 0, format,
-               GL_UNSIGNED_BYTE, NULL);
+  if (format == GL_RGBA16F) {
+    // F16 backing store (HDR compositing). GL_RGBA16F is a sized internal
+    // format and can't double as the pixel-transfer format the way GL_RGBA /
+    // GL_BGRA_EXT do below.
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA16F, width, height, 0, GL_RGBA,
+                 GL_HALF_FLOAT, NULL);
+  } else {
+    glTexImage2D(GL_TEXTURE_2D, 0, format, width, height, 0, format,
+                 GL_UNSIGNED_BYTE, NULL);
+  }
   glBindTexture(GL_TEXTURE_2D, 0);
 
   if (shareable) {

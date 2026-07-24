@@ -76,3 +76,29 @@ TEST(FlTextureGLTest, PopulateTexture) {
   EXPECT_EQ(opengl_texture.width, kRealBufferWidth);
   EXPECT_EQ(opengl_texture.height, kRealBufferHeight);
 }
+
+// Textures that don't declare a format are reported to the engine as
+// GL_RGBA8 (the historical contract).
+TEST(FlTextureGLTest, DefaultFormatIsRgba8) {
+  g_autoptr(FlTextureGL) texture = FL_TEXTURE_GL(fl_test_texture_new());
+  FlutterOpenGLTexture opengl_texture = {0};
+  g_autoptr(GError) error = nullptr;
+  EXPECT_TRUE(fl_texture_gl_populate(texture, kBufferWidth, kBufferHeight,
+                                     &opengl_texture, &error));
+  EXPECT_EQ(error, nullptr);
+  EXPECT_EQ(opengl_texture.format, static_cast<uint32_t>(GL_RGBA8));
+}
+
+// A provider that declares GL_RGBA16F (HDR / wide-gamut content) has that
+// format reported to the engine, so Skia wraps the texture at full
+// precision instead of clamping it through an 8-bit read.
+TEST(FlTextureGLTest, SetFormat) {
+  g_autoptr(FlTextureGL) texture = FL_TEXTURE_GL(fl_test_texture_new());
+  fl_texture_gl_set_format(texture, GL_RGBA16F);
+  FlutterOpenGLTexture opengl_texture = {0};
+  g_autoptr(GError) error = nullptr;
+  EXPECT_TRUE(fl_texture_gl_populate(texture, kBufferWidth, kBufferHeight,
+                                     &opengl_texture, &error));
+  EXPECT_EQ(error, nullptr);
+  EXPECT_EQ(opengl_texture.format, static_cast<uint32_t>(GL_RGBA16F));
+}

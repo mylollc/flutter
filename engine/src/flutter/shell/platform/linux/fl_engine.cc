@@ -104,6 +104,13 @@ struct _FlEngine {
   FlEnginePlatformMessageHandler platform_message_handler;
   gpointer platform_message_handler_data;
   GDestroyNotify platform_message_handler_destroy_notify;
+
+  // When TRUE, OpenGL backing stores are allocated as GL_RGBA16F instead of
+  // 8-bit. Set by FlView when it selects the HDR-capable compositor
+  // (FlCompositorHDR); embedder.cc then wraps the stores as
+  // kRGBA_F16_SkColorType with a linear color space, so Skia composites
+  // linear scRGB values (1.0 = SDR white) end to end.
+  gboolean f16_backing_stores;
 };
 
 G_DEFINE_QUARK(fl_engine_error_quark, fl_engine_error)
@@ -257,7 +264,13 @@ static bool create_opengl_backing_store(
 
   GLint sized_format = GL_RGBA8;
   GLint general_format = GL_RGBA;
-  if (epoxy_has_gl_extension("GL_EXT_texture_format_BGRA8888")) {
+  if (self->f16_backing_stores) {
+    // HDR presentation: F16 stores. embedder.cc maps GL_RGBA16F to
+    // kRGBA_F16_SkColorType + a linear color space (see
+    // MakeSkSurfaceFromBackingStore), matching the Windows F16 path.
+    sized_format = GL_RGBA16F;
+    general_format = GL_RGBA16F;
+  } else if (epoxy_has_gl_extension("GL_EXT_texture_format_BGRA8888")) {
     sized_format = GL_BGRA8_EXT;
     general_format = GL_BGRA_EXT;
   }
@@ -716,6 +729,11 @@ FlutterRendererType fl_engine_get_renderer_type(FlEngine* self) {
 FlOpenGLManager* fl_engine_get_opengl_manager(FlEngine* self) {
   g_return_val_if_fail(FL_IS_ENGINE(self), nullptr);
   return self->opengl_manager;
+}
+
+void fl_engine_set_f16_backing_stores(FlEngine* self, gboolean enable) {
+  g_return_if_fail(FL_IS_ENGINE(self));
+  self->f16_backing_stores = enable;
 }
 
 FlDisplayMonitor* fl_engine_get_display_monitor(FlEngine* self) {

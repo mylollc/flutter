@@ -22,6 +22,14 @@ _pkg_configs = [
     name = "epoxy"
     package = "epoxy"
   },
+
+  # GBM for the HDR compositor's dma-buf present ring (fl_compositor_hdr).
+  # System version is fine (stable API), resolved from the host like gtk/epoxy;
+  # only wayland itself needed the vendored bump (see wayland_vendor).
+  {
+    name = "gbm"
+    package = "gbm"
+  },
 ]
 
 foreach(pkg, _pkg_configs) {
