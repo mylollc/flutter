@@ -159,6 +159,13 @@ static NSEventModifierFlags KeyEquivalentModifierMaskForModifiers(NSNumber* modi
  */
 @interface FlutterMenuDelegate : NSObject <NSMenuDelegate>
 /**
+ * The framework-assigned id of the menu item this delegate belongs to. The
+ * reconcile in -setMenus: keeps items across rebuilds, but a structural change
+ * can re-key an item, so this is mutable and refreshed to keep open/close
+ * callbacks routing to the current Dart id.
+ */
+@property(nonatomic, assign) int64_t identifier;
+/**
  * When this delegate receives notification that the menu opened or closed, it
  * will send a message on the given channel to that effect for the menu item
  * with the given id (the ID comes from the data supplied by the framework to
@@ -169,7 +176,6 @@ static NSEventModifierFlags KeyEquivalentModifierMaskForModifiers(NSNumber* modi
 
 @implementation FlutterMenuDelegate {
   FlutterMethodChannel* _channel;
-  int64_t _identifier;
 }
 
 - (instancetype)initWithIdentifier:(int64_t)identifier channel:(FlutterMethodChannel*)channel {
@@ -213,6 +219,13 @@ static NSEventModifierFlags KeyEquivalentModifierMaskForModifiers(NSNumber* modi
 // Used as the callback for all Flutter-created menu items that have IDs.
 - (void)flutterMenuItemSelected:(id)sender;
 
+// Reconcile the existing NSMenu tree in place to match a re-sent representation,
+// reusing items by id (see the implementation).
+- (void)reconcileMenu:(NSMenu*)menu withRepresentations:(NSArray*)reps;
+- (void)updateReconciledItem:(NSMenuItem*)item fromRepresentation:(NSDictionary*)rep;
+- (BOOL)item:(NSMenuItem*)item matchesKindOfRepresentation:(NSDictionary*)rep;
+- (void)collectMenuDelegates:(NSMenu*)menu into:(NSMutableArray<FlutterMenuDelegate*>*)out;
+
 // Replaces the NSApp.mainMenu with menus created from an array of top level
 // menus sent by the framework.
 - (void)setMenus:(nonnull NSDictionary*)representation;
@@ -225,9 +238,16 @@ static NSEventModifierFlags KeyEquivalentModifierMaskForModifiers(NSNumber* modi
   // This contains a copy of the default platform provided items.
   NSArray<NSMenuItem*>* _platformProvidedItems;
   // These are the menu delegates that will listen to open/close events for menu
-  // items. This array is holding them so that we can deallocate them when
-  // rebuilding the menus.
+  // items. This array holds them so they stay alive as long as the menu tree
+  // they're attached to. The reconcile in -setMenus: keeps the ones for reused
+  // submenus and drops the ones for removed submenus.
   NSMutableArray<FlutterMenuDelegate*>* _menuDelegates;
+
+  // NO once the first real menu set has been built. The first -setMenus: builds
+  // the tree wholesale (replacing the app's default NSApp.mainMenu); every
+  // subsequent call reconciles the incoming representation onto the existing
+  // tree in place (see -setMenus:).
+  BOOL _menusBuilt;
 }
 
 #pragma mark - Private Methods
@@ -238,6 +258,7 @@ static NSEventModifierFlags KeyEquivalentModifierMaskForModifiers(NSNumber* modi
     _channel = channel;
     _platformProvidedItems = @[];
     _menuDelegates = [[NSMutableArray alloc] init];
+    _menusBuilt = NO;
 
     // Make a copy of all the platform provided menus for later use.
     _platformProvidedItems = [[NSApp.mainMenu itemArray] mutableCopy];
@@ -307,35 +328,37 @@ static NSEventModifierFlags KeyEquivalentModifierMaskForModifiers(NSNumber* modi
   return [found copy];
 }
 
+// The macOS keyEquivalent string a Flutter menu representation maps to, or @""
+// when it carries no accelerator. Shared by the create path and the reconcile so
+// a reused item's accelerator is recomputed identically to a fresh one.
+- (NSString*)keyEquivalentFromRepresentation:(NSDictionary*)representation {
+  if (representation[kShortcutCharacterKey]) {
+    return representation[kShortcutCharacterKey];
+  }
+  NSNumber* triggerKeyId = representation[kShortcutTriggerKey];
+  const NSDictionary<NSNumber*, NSNumber*>* specialKeys = GetMacOsSpecialKeys();
+  NSNumber* trigger = specialKeys[triggerKeyId];
+  if (trigger) {
+    return [NSString stringWithFormat:@"%C", [trigger unsignedShortValue]];
+  }
+  if (([triggerKeyId unsignedLongLongValue] & kFlutterKeyIdPlaneMask) ==
+      kFlutterKeyIdUnicodePlane) {
+    return [[NSString stringWithFormat:@"%C", (unichar)([triggerKeyId unsignedLongLongValue] &
+                                                        kFlutterKeyIdValueMask)] lowercaseString];
+  }
+  return @"";
+}
+
 - (NSMenuItem*)menuItemFromFlutterRepresentation:(NSDictionary*)representation {
   if ([(NSNumber*)([representation valueForKey:kDividerKey]) intValue] == YES) {
     return [NSMenuItem separatorItem];
   }
   NSNumber* platformProvidedMenuId = representation[kPlatformProvidedMenuKey];
-  NSString* keyEquivalent = @"";
-
   if (platformProvidedMenuId) {
     return [self
         createPlatformProvidedMenu:(flutter::PlatformProvidedMenu)platformProvidedMenuId.intValue];
-  } else {
-    if (representation[kShortcutCharacterKey]) {
-      keyEquivalent = representation[kShortcutCharacterKey];
-    } else {
-      NSNumber* triggerKeyId = representation[kShortcutTriggerKey];
-      const NSDictionary<NSNumber*, NSNumber*>* specialKeys = GetMacOsSpecialKeys();
-      NSNumber* trigger = specialKeys[triggerKeyId];
-      if (trigger) {
-        keyEquivalent = [NSString stringWithFormat:@"%C", [trigger unsignedShortValue]];
-      } else {
-        if (([triggerKeyId unsignedLongLongValue] & kFlutterKeyIdPlaneMask) ==
-            kFlutterKeyIdUnicodePlane) {
-          keyEquivalent = [[NSString
-              stringWithFormat:@"%C", (unichar)([triggerKeyId unsignedLongLongValue] &
-                                                kFlutterKeyIdValueMask)] lowercaseString];
-        }
-      }
-    }
   }
+  NSString* keyEquivalent = [self keyEquivalentFromRepresentation:representation];
 
   NSNumber* identifier = representation[kIdKey];
   SEL action = (identifier ? @selector(flutterMenuItemSelected:) : NULL);
@@ -399,21 +422,178 @@ static NSEventModifierFlags KeyEquivalentModifierMaskForModifiers(NSNumber* modi
 }
 
 - (void)setMenus:(NSDictionary*)representation {
-  [_menuDelegates removeAllObjects];
-  NSMenu* newMenu = [[NSMenu alloc] init];
   // There's currently only one window, named "0", but there could be other
   // eventually, with different menu configurations.
-  for (NSDictionary* item in representation[@"0"]) {
-    NSMenuItem* menuItem = [self menuItemFromFlutterRepresentation:item];
-    menuItem.representedObject = self;
-    NSNumber* identifier = item[kIdKey];
-    FlutterMenuDelegate* delegate =
-        [[FlutterMenuDelegate alloc] initWithIdentifier:identifier.longLongValue channel:_channel];
-    [_menuDelegates addObject:delegate];
-    [menuItem submenu].delegate = delegate;
-    [newMenu addItem:menuItem];
+  NSArray* topLevel = representation[@"0"];
+
+  // First call: build the tree wholesale, replacing the app's default
+  // NSApp.mainMenu. Every later call RECONCILES the incoming representation onto
+  // the existing NSMenu tree in place, reusing the NSMenuItem at each position.
+  // Reusing items instead of rebuilding the tree is what keeps selection routing
+  // (tag → target/action), checkmark state, and any open submenu intact across a
+  // re-send — so a menu can be refreshed while it is open (reveal-driven refresh)
+  // without being torn down and dismissed. It also mirrors the platform-native
+  // approach (persistent menu items whose state is updated on demand) rather than
+  // rebuilding on every change.
+  if (!_menusBuilt || NSApp.mainMenu == nil) {
+    [_menuDelegates removeAllObjects];
+    NSMenu* newMenu = [[NSMenu alloc] init];
+    for (NSDictionary* item in topLevel) {
+      NSMenuItem* menuItem = [self menuItemFromFlutterRepresentation:item];
+      if (menuItem == nil) {
+        continue;
+      }
+      menuItem.representedObject = self;
+      NSNumber* identifier = item[kIdKey];
+      FlutterMenuDelegate* delegate =
+          [[FlutterMenuDelegate alloc] initWithIdentifier:identifier.longLongValue channel:_channel];
+      [_menuDelegates addObject:delegate];
+      [menuItem submenu].delegate = delegate;
+      [newMenu addItem:menuItem];
+    }
+    NSApp.mainMenu = newMenu;
+    _menusBuilt = YES;
+  } else {
+    [self reconcileMenu:NSApp.mainMenu withRepresentations:topLevel];
   }
-  NSApp.mainMenu = newMenu;
+
+  // Rebuild the delegate retain set from the live tree, dropping delegates whose
+  // submenus the reconcile removed (NSMenu.delegate is weak, so this array is
+  // what keeps the live ones alive).
+  NSMutableArray<FlutterMenuDelegate*>* liveDelegates = [NSMutableArray array];
+  [self collectMenuDelegates:NSApp.mainMenu into:liveDelegates];
+  _menuDelegates = liveDelegates;
+}
+
+// Collect the FlutterMenuDelegates attached to |menu| and its submenus.
+- (void)collectMenuDelegates:(NSMenu*)menu into:(NSMutableArray<FlutterMenuDelegate*>*)out {
+  for (NSMenuItem* item in menu.itemArray) {
+    NSMenu* submenu = item.submenu;
+    if (submenu == nil) {
+      continue;
+    }
+    if ([submenu.delegate isKindOfClass:[FlutterMenuDelegate class]]) {
+      [out addObject:(FlutterMenuDelegate*)submenu.delegate];
+    }
+    [self collectMenuDelegates:submenu into:out];
+  }
+}
+
+// Reconcile |menu| to match |reps| BY POSITION, reusing the existing NSMenuItem
+// at each index in place (its identity — target/action for selection routing,
+// checkmark state, and any open submenu — is preserved) and only updating its
+// mutable attributes. Reusing rather than recreating is what lets a re-send
+// refresh an OPEN menu without tearing it down and dismissing it. The framework
+// re-mints item ids on every re-send, so position (not id) is the stable key;
+// each reused item's tag is refreshed to the current id so routing still works.
+// AppKit-injected custom items (e.g. the Help menu's search field, which carries
+// a custom view) are stepped over and left untouched.
+- (void)reconcileMenu:(NSMenu*)menu withRepresentations:(NSArray*)reps {
+  NSInteger repIdx = 0;
+  NSInteger itemIdx = 0;
+  while (repIdx < (NSInteger)reps.count) {
+    // Leave AppKit-injected custom items (identified by a custom view) in place.
+    while (itemIdx < menu.numberOfItems && [menu itemAtIndex:itemIdx].view != nil) {
+      itemIdx += 1;
+    }
+    NSDictionary* rep = reps[repIdx];
+    NSMenuItem* item = (itemIdx < menu.numberOfItems) ? [menu itemAtIndex:itemIdx] : nil;
+    if (item != nil && [self item:item matchesKindOfRepresentation:rep]) {
+      [self updateReconciledItem:item fromRepresentation:rep];
+      NSArray* children = rep[kChildrenKey];
+      if (children.count > 0 && item.submenu != nil) {
+        [self reconcileMenu:item.submenu withRepresentations:children];
+      }
+      repIdx += 1;
+      itemIdx += 1;
+      continue;
+    }
+    if (item != nil) {
+      // Kind changed at this position — replace this one item.
+      [menu removeItemAtIndex:itemIdx];
+    }
+    NSMenuItem* fresh = [self menuItemFromFlutterRepresentation:rep];
+    if (fresh != nil) {
+      fresh.representedObject = self;
+      [menu insertItem:fresh atIndex:MIN(itemIdx, menu.numberOfItems)];
+      itemIdx += 1;
+    }
+    repIdx += 1;
+  }
+  // Remove our trailing extras, keeping any AppKit view items.
+  while (itemIdx < menu.numberOfItems) {
+    if ([menu itemAtIndex:itemIdx].view != nil) {
+      itemIdx += 1;
+      continue;
+    }
+    [menu removeItemAtIndex:itemIdx];
+  }
+}
+
+// Whether |item| is the same KIND as |rep| describes (separator vs normal, and
+// submenu vs leaf), so it can be reused. Platform-provided items are static
+// AppKit copies matched purely by tag, so a provided rep is always reusable.
+- (BOOL)item:(NSMenuItem*)item matchesKindOfRepresentation:(NSDictionary*)rep {
+  BOOL repIsDivider = [(NSNumber*)rep[kDividerKey] intValue] == YES;
+  if (repIsDivider != item.isSeparatorItem) {
+    return NO;
+  }
+  if (repIsDivider || rep[kPlatformProvidedMenuKey] != nil) {
+    return YES;
+  }
+  NSArray* children = rep[kChildrenKey];
+  BOOL repHasSubmenu = children != nil && children.count > 0;
+  return repHasSubmenu == (item.submenu != nil);
+}
+
+// Update the mutable attributes of a reused item. Its kind and submenu presence
+// are unchanged (matched by position); only label / enabled / the routing id can
+// move. NSMenuItem.state is deliberately untouched: the framework representation
+// doesn't carry a checked state, so it may be set out-of-band by the application,
+// and reusing the item (rather than recreating it) preserves whatever was set.
+- (void)updateReconciledItem:(NSMenuItem*)item fromRepresentation:(NSDictionary*)rep {
+  if (item.isSeparatorItem || rep[kPlatformProvidedMenuKey] != nil) {
+    return;
+  }
+  // Guard every write so a reveal that changes nothing mutates nothing:
+  // mutating a live NSMenu item (even to the same value) while it is tracking can
+  // cancel tracking and dismiss the menu, so only write on an actual change.
+  NSString* appName = [NSRunningApplication currentApplication].localizedName;
+  NSString* title = [rep[kLabelKey] stringByReplacingOccurrencesOfString:kAppName
+                                                              withString:appName];
+  if (title != nil && ![item.title isEqualToString:title]) {
+    item.title = title;
+  }
+  // Refresh the accelerator too: a reused item keeps the keyEquivalent it was
+  // created with, so an item whose logical identity moved into this position
+  // would otherwise display a stale shortcut (e.g. Show Focus Peaking showing
+  // ⌘/C left over from a Crop item that first occupied the slot).
+  NSString* keyEquivalent = [self keyEquivalentFromRepresentation:rep];
+  if (![item.keyEquivalent isEqualToString:keyEquivalent]) {
+    item.keyEquivalent = keyEquivalent;
+  }
+  NSEventModifierFlags mask =
+      keyEquivalent.length > 0 ? KeyEquivalentModifierMaskForModifiers(rep[kShortcutModifiersKey])
+                               : (NSEventModifierFlags)0;
+  if (item.keyEquivalentModifierMask != mask) {
+    item.keyEquivalentModifierMask = mask;
+  }
+  NSNumber* enabled = rep[kEnabledKey];
+  if (enabled != nil && item.enabled != enabled.boolValue) {
+    item.enabled = enabled.boolValue;
+  }
+  NSNumber* identifier = rep[kIdKey];
+  if (identifier != nil) {
+    int64_t newTag = identifier.longLongValue;
+    if (item.tag != newTag) {
+      item.tag = newTag;
+    }
+    id delegate = item.submenu.delegate;
+    if ([delegate isKindOfClass:[FlutterMenuDelegate class]] &&
+        ((FlutterMenuDelegate*)delegate).identifier != newTag) {
+      ((FlutterMenuDelegate*)delegate).identifier = newTag;
+    }
+  }
 }
 
 #pragma mark - Public Class Methods
