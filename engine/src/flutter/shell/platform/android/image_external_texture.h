@@ -79,6 +79,15 @@ class ImageExternalTexture : public flutter::Texture {
   /// Safe to call with `handle.buffer == nullptr` as a no-op.
   void ReleaseAcquiredHardwareBuffer(const AcquiredHardwareBuffer& handle);
 
+  /// Wait (up to 2 s) until a producer's acquire fence (a Linux sync_fd) is
+  /// signaled, then close it. Backends call this before sampling a buffer
+  /// taken from `AcquireLatestHardwareBuffer`.
+  static void WaitOnAndCloseSyncFd(int fd);
+
+  /// Signal a producer's release-ack `eventfd` (the buffer is free to reuse)
+  /// and close it. A no-op for `-1`.
+  static void SignalAndCloseAckFd(int fd);
+
   void CloseImage(const fml::jni::JavaRef<jobject>& image);
 
   JavaLocalRef HardwareBufferFor(const fml::jni::JavaRef<jobject>& image);

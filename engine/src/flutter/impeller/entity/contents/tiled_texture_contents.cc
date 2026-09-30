@@ -153,6 +153,12 @@ bool TiledTextureContents::Render(const ContentContext& renderer,
           frag_info.y_tile_mode =
               static_cast<Scalar>(sampler_descriptor_.height_address_mode);
           frag_info.alpha = GetOpacityFactor();
+          // No color space conversion on this path (the non-external tiled
+          // shader has none either): identity leaves the draw unchanged.
+          frag_info.gamma_encode = 0.0f;
+          frag_info.color_row0 = Vector3(1.0f, 0.0f, 0.0f);
+          frag_info.color_row1 = Vector3(0.0f, 1.0f, 0.0f);
+          frag_info.color_row2 = Vector3(0.0f, 0.0f, 1.0f);
           FSExternal::BindFragInfo(pass,
                                    data_host_buffer.EmplaceUniform(frag_info));
 

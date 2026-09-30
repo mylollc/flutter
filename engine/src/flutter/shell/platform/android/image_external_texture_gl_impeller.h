@@ -33,11 +33,11 @@ class ImageExternalTextureGLImpeller : public ImageExternalTextureGL {
   void Detach() override;
 
   // |ImageExternalTextureGL|
-  sk_sp<flutter::DlImage> CreateDlImage(
-      PaintContext& context,
-      const SkRect& bounds,
-      std::optional<HardwareBufferKey> id,
-      impeller::UniqueEGLImageKHR&& egl_image) override;
+  sk_sp<flutter::DlImage> CreateDlImage(PaintContext& context,
+                                        const SkRect& bounds,
+                                        std::optional<HardwareBufferKey> id,
+                                        impeller::UniqueEGLImageKHR&& egl_image,
+                                        const BufferInfo& info) override;
 
   const std::shared_ptr<impeller::ContextGLES> impeller_context_;
 

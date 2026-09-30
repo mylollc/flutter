@@ -4,9 +4,6 @@
 
 #include "flutter/shell/platform/android/image_external_texture_vk_impeller.h"
 
-#include <poll.h>
-#include <unistd.h>
-#include <cerrno>
 #include <cstdint>
 
 #include "flutter/fml/closure.h"
@@ -20,63 +17,6 @@
 #include "flutter/impeller/toolkit/android/hardware_buffer.h"
 
 namespace flutter {
-
-namespace {
-
-// Wait until a Linux sync_fd (POSIX fd emitted by
-// `VK_KHR_external_semaphore_fd` in `SYNC_FD` mode) is signaled, then
-// close it. Runs on the raster thread before the Ingest barrier submit
-// — closes the producer→consumer cross-context sync gap that
-// `VK_ERROR_DEVICE_LOST` under Mali would otherwise punish. `poll`
-// with `POLLIN` is how the Android sync framework surfaces signal
-// readiness on sync_fd; `sync_wait` would do the same via a slightly
-// higher-level wrapper but isn't part of the NDK base surface we
-// target. Infinite timeout is safe: a signaled sync_fd returns
-// immediately, and an unsignaled one is waiting on GPU work that is
-// guaranteed to complete (the producer has already submitted).
-// Signal a producer-supplied `eventfd` (8-byte counter increment via
-// `write`) and close it. Used on every exit path of IngestHardwareBuffer
-// where the engine is done with the AHB — either because it sampled,
-// because it can't sample (error), or because the sample finished
-// asynchronously in an Impeller completion callback.
-void SignalAndCloseAckFd(int fd) {
-  if (fd < 0) {
-    return;
-  }
-  const uint64_t one = 1;
-  (void)::write(fd, &one, sizeof(one));
-  ::close(fd);
-}
-
-// Producer-fence wait timeout. Normal signal latency is microseconds;
-// this bound just keeps a stuck driver or hung producer from freezing
-// the raster thread indefinitely. Exceeding it is unusual enough to
-// warrant an error log; the sampling that follows may race producer
-// GPU writes for one frame, typically self-correcting on the next.
-constexpr int kSyncFenceTimeoutMs = 2000;
-
-void WaitOnAndCloseSyncFd(int fd) {
-  struct pollfd pfd;
-  pfd.fd = fd;
-  pfd.events = POLLIN;
-  pfd.revents = 0;
-  int rc;
-  do {
-    rc = ::poll(&pfd, 1, kSyncFenceTimeoutMs);
-  } while (rc == -1 && errno == EINTR);
-  if (rc < 0) {
-    FML_LOG(ERROR) << "poll on sync_fd " << fd
-                   << " failed: errno=" << errno
-                   << " — sampling may race producer GPU writes";
-  } else if (rc == 0) {
-    FML_LOG(ERROR) << "poll on sync_fd " << fd << " timed out after "
-                   << kSyncFenceTimeoutMs << "ms — producer fence never "
-                   << "signaled; sampling may race GPU writes for this frame";
-  }
-  ::close(fd);
-}
-
-}  // namespace
 
 ImageExternalTextureVKImpeller::ImageExternalTextureVKImpeller(
     const std::shared_ptr<impeller::ContextVK>& impeller_context,

@@ -7,13 +7,61 @@
 #include <android/hardware_buffer.h>
 #include <android/hardware_buffer_jni.h>
 #include <android/sensor.h>
+#include <poll.h>
 #include <unistd.h>
+#include <cerrno>
+#include <cstdint>
 
 #include "flutter/fml/platform/android/jni_util.h"
 #include "flutter/impeller/toolkit/android/proc_table.h"
 #include "flutter/shell/platform/android/jni/platform_view_android_jni.h"
 
 namespace flutter {
+
+namespace {
+
+// Producer-fence wait timeout. Normal signal latency is microseconds;
+// this bound just keeps a stuck driver or hung producer from freezing
+// the raster thread indefinitely. Exceeding it is unusual enough to
+// warrant an error log; the sampling that follows may race producer
+// GPU writes for one frame, typically self-correcting on the next.
+constexpr int kSyncFenceTimeoutMs = 2000;
+
+}  // namespace
+
+// `poll` with `POLLIN` is how the Android sync framework surfaces signal
+// readiness on a sync_fd; `sync_wait` would do the same via a slightly
+// higher-level wrapper but isn't part of the NDK base surface we target.
+void ImageExternalTexture::WaitOnAndCloseSyncFd(int fd) {
+  struct pollfd pfd;
+  pfd.fd = fd;
+  pfd.events = POLLIN;
+  pfd.revents = 0;
+  int rc;
+  do {
+    rc = ::poll(&pfd, 1, kSyncFenceTimeoutMs);
+  } while (rc == -1 && errno == EINTR);
+  if (rc < 0) {
+    FML_LOG(ERROR) << "poll on sync_fd " << fd << " failed: errno=" << errno
+                   << " — sampling may race producer GPU writes";
+  } else if (rc == 0) {
+    FML_LOG(ERROR) << "poll on sync_fd " << fd << " timed out after "
+                   << kSyncFenceTimeoutMs << "ms — producer fence never "
+                   << "signaled; sampling may race GPU writes for this frame";
+  }
+  ::close(fd);
+}
+
+// The release-ack fd is an `eventfd`: an 8-byte counter increment wakes
+// the producer's `poll(POLLIN)`.
+void ImageExternalTexture::SignalAndCloseAckFd(int fd) {
+  if (fd < 0) {
+    return;
+  }
+  const uint64_t one = 1;
+  (void)::write(fd, &one, sizeof(one));
+  ::close(fd);
+}
 
 ImageExternalTexture::ImageExternalTexture(
     int64_t id,

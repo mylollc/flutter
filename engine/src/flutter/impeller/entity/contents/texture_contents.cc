@@ -238,6 +238,10 @@ bool TextureContents::Render(const ContentContext& renderer,
     frag_info.y_tile_mode =
         static_cast<Scalar>(sampler_descriptor_.height_address_mode);
     frag_info.alpha = GetOpacity();
+    frag_info.gamma_encode = needs_gamma_encode ? 1.0f : 0.0f;
+    frag_info.color_row0 = color_row0;
+    frag_info.color_row1 = color_row1;
+    frag_info.color_row2 = color_row2;
     FSExternal::BindFragInfo(pass, data_host_buffer.EmplaceUniform(frag_info));
 
     SamplerDescriptor sampler_desc;

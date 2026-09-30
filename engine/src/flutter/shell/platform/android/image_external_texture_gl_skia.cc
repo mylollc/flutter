@@ -44,7 +44,10 @@ sk_sp<flutter::DlImage> ImageExternalTextureGLSkia::CreateDlImage(
     PaintContext& context,
     const SkRect& bounds,
     std::optional<HardwareBufferKey> id,
-    impeller::UniqueEGLImageKHR&& egl_image) {
+    impeller::UniqueEGLImageKHR&& egl_image,
+    const BufferInfo& info) {
+  // `info` is unused: color space conversion is Impeller-only, so Skia
+  // samples an F16 buffer's values as they are.
   GLuint texture_name;
   glGenTextures(1, &texture_name);
   auto gl_texture = impeller::GLTexture{texture_name};

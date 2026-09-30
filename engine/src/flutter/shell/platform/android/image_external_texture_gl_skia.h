@@ -30,11 +30,11 @@ class ImageExternalTextureGLSkia : public ImageExternalTextureGL {
   void Detach() override;
 
   // |ImageExternalTextureGL|
-  sk_sp<flutter::DlImage> CreateDlImage(
-      PaintContext& context,
-      const SkRect& bounds,
-      std::optional<HardwareBufferKey> id,
-      impeller::UniqueEGLImageKHR&& egl_image) override;
+  sk_sp<flutter::DlImage> CreateDlImage(PaintContext& context,
+                                        const SkRect& bounds,
+                                        std::optional<HardwareBufferKey> id,
+                                        impeller::UniqueEGLImageKHR&& egl_image,
+                                        const BufferInfo& info) override;
 
   void BindImageToTexture(const impeller::UniqueEGLImageKHR& image, GLuint tex);
 

@@ -30,7 +30,8 @@ sk_sp<flutter::DlImage> ImageExternalTextureGLImpeller::CreateDlImage(
     PaintContext& context,
     const SkRect& bounds,
     std::optional<HardwareBufferKey> id,
-    impeller::UniqueEGLImageKHR&& egl_image) {
+    impeller::UniqueEGLImageKHR&& egl_image,
+    const BufferInfo& info) {
   impeller::TextureDescriptor desc;
   desc.type = impeller::TextureType::kTextureExternalOES;
   desc.storage_mode = impeller::StorageMode::kDevicePrivate;
@@ -38,6 +39,22 @@ sk_sp<flutter::DlImage> ImageExternalTextureGLImpeller::CreateDlImage(
   desc.size = {static_cast<int>(bounds.width()),
                static_cast<int>(bounds.height())};
   desc.mip_count = 1;
+  // Direct-AHB intake: describe the buffer itself, as the Vulkan texture
+  // source (`AHBTextureSourceVK`) does, so TextureContents converts its
+  // color space when it draws the texture.
+  if (!info.size.IsEmpty()) {
+    desc.size = info.size;
+  }
+  if (info.format == AHARDWAREBUFFER_FORMAT_R16G16B16A16_FLOAT) {
+    desc.format = impeller::PixelFormat::kR16G16B16A16Float;
+  }
+  if (info.color_space >= 0) {
+    desc.color_space = static_cast<impeller::ColorSpace>(info.color_space);
+  } else if (desc.format == impeller::PixelFormat::kR16G16B16A16Float) {
+    // Same inference as the Vulkan texture source: an F16 buffer with no
+    // declared color space is linear Display P3.
+    desc.color_space = impeller::ColorSpace::kLinearDisplayP3;
+  }
   auto texture = std::make_shared<impeller::TextureGLES>(
       impeller_context_->GetReactor(), desc);
   // The contents will be initialized later in the call to
