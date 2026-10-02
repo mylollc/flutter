@@ -23,6 +23,7 @@ import android.os.LocaleList;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import io.flutter.embedding.engine.dart.DartExecutor;
 import io.flutter.embedding.engine.mutatorsstack.FlutterMutatorsStack;
+import io.flutter.embedding.engine.renderer.FlutterSurfaceDynamicRangeListener;
 import io.flutter.embedding.engine.renderer.FlutterUiDisplayListener;
 import io.flutter.embedding.engine.renderer.FlutterUiResizeListener;
 import io.flutter.embedding.engine.systemchannels.LocalizationChannel;
@@ -68,6 +69,38 @@ public class FlutterJNITest {
 
     // --- Verify Results ---
     assertEquals(1, callbackInvocationCount.get());
+  }
+
+  @Test
+  public void surfaceDynamicRangeIsSdrUntilASurfaceReportsOtherwise() {
+    FlutterJNI flutterJNI = new FlutterJNI();
+    assertFalse(flutterJNI.isSurfaceExtendedRange());
+
+    flutterJNI.onSurfaceDynamicRangeChanged(true);
+    assertTrue(flutterJNI.isSurfaceExtendedRange());
+
+    flutterJNI.onSurfaceDynamicRangeChanged(false);
+    assertFalse(flutterJNI.isSurfaceExtendedRange());
+  }
+
+  @Test
+  public void surfaceDynamicRangeListenersHearOnlyChanges() {
+    FlutterJNI flutterJNI = new FlutterJNI();
+    FlutterSurfaceDynamicRangeListener listener = mock(FlutterSurfaceDynamicRangeListener.class);
+    flutterJNI.addSurfaceDynamicRangeListener(listener);
+
+    // The initial state is SDR, so a first SDR report is not a change.
+    flutterJNI.onSurfaceDynamicRangeChanged(false);
+    flutterJNI.onSurfaceDynamicRangeChanged(true);
+    flutterJNI.onSurfaceDynamicRangeChanged(true);
+    flutterJNI.onSurfaceDynamicRangeChanged(false);
+
+    verify(listener, times(1)).onSurfaceDynamicRangeChanged(true);
+    verify(listener, times(1)).onSurfaceDynamicRangeChanged(false);
+
+    flutterJNI.removeSurfaceDynamicRangeListener(listener);
+    flutterJNI.onSurfaceDynamicRangeChanged(true);
+    verify(listener, times(1)).onSurfaceDynamicRangeChanged(true);
   }
 
   @Test

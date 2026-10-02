@@ -39,6 +39,10 @@ JavaRef<jobject>::JavaRef(JNIEnv* env, jobject obj) : obj_(obj) {
 JavaRef<jobject>::~JavaRef() = default;
 
 JNIEnv* JavaRef<jobject>::SetNewLocalRef(JNIEnv* env, jobject obj) {
+  if (!obj && !obj_) {
+    // Null to null: nothing to create or delete, so no need for a JVM.
+    return env;
+  }
   if (!env) {
     env = AttachCurrentThread();
   } else {
@@ -55,6 +59,10 @@ JNIEnv* JavaRef<jobject>::SetNewLocalRef(JNIEnv* env, jobject obj) {
 }
 
 void JavaRef<jobject>::SetNewGlobalRef(JNIEnv* env, jobject obj) {
+  if (!obj && !obj_) {
+    // Null to null: nothing to create or delete, so no need for a JVM.
+    return;
+  }
   if (!env) {
     env = AttachCurrentThread();
   } else {

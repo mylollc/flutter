@@ -14,8 +14,13 @@ ImageExternalTextureGLSkia::ImageExternalTextureGLSkia(
     int64_t id,
     const fml::jni::ScopedJavaGlobalRef<jobject>& image_texture_entry,
     const std::shared_ptr<PlatformViewAndroidJNI>& jni_facade,
-    ImageExternalTexture::ImageLifecycle lifecycle)
-    : ImageExternalTextureGL(id, image_texture_entry, jni_facade, lifecycle) {}
+    ImageExternalTexture::ImageLifecycle lifecycle,
+    fml::RefPtr<fml::TaskRunner> raster_task_runner)
+    : ImageExternalTextureGL(id,
+                             image_texture_entry,
+                             jni_facade,
+                             lifecycle,
+                             std::move(raster_task_runner)) {}
 
 void ImageExternalTextureGLSkia::Attach(PaintContext& context) {
   if (state_ == AttachmentState::kUninitialized) {
@@ -44,7 +49,10 @@ sk_sp<flutter::DlImage> ImageExternalTextureGLSkia::CreateDlImage(
     PaintContext& context,
     const SkRect& bounds,
     std::optional<HardwareBufferKey> id,
-    impeller::UniqueEGLImageKHR&& egl_image) {
+    impeller::UniqueEGLImageKHR&& egl_image,
+    const BufferInfo& info) {
+  // `info` is unused: color space conversion is Impeller-only, so Skia
+  // samples an F16 buffer's values as they are.
   GLuint texture_name;
   glGenTextures(1, &texture_name);
   auto gl_texture = impeller::GLTexture{texture_name};

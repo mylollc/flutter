@@ -42,6 +42,8 @@ class PlatformViewAndroidJNIImpl final : public PlatformViewAndroidJNI {
 
   void FlutterViewOnFirstFrame() override;
 
+  void FlutterViewOnSurfaceDynamicRangeChanged(bool extended_range) override;
+
   void FlutterViewOnPreEngineRestart() override;
 
   void FlutterViewSetSemanticsTreeEnabled(bool enabled) override;
@@ -62,6 +64,11 @@ class PlatformViewAndroidJNIImpl final : public PlatformViewAndroidJNI {
 
   AcquiredHardwareBuffer ImageProducerTextureEntryAcquireLatestHardwareBuffer(
       JavaLocalRef image_texture_entry) override;
+
+  void ImageProducerTextureEntryOnHardwareBufferReleased(
+      JavaLocalRef image_texture_entry,
+      AHardwareBuffer* buffer,
+      int release_fence_fd) override;
 
   JavaLocalRef ImageGetHardwareBuffer(JavaLocalRef image) override;
 
