@@ -8,9 +8,26 @@
 #include <memory>
 
 #include "impeller/core/sampler_descriptor.h"
+#include "impeller/core/texture_descriptor.h"
 #include "impeller/entity/contents/contents.h"
+#include "impeller/geometry/vector.h"
 
 namespace impeller {
+
+/// The gamut conversion and transfer encoding that a texture fill applies to
+/// draw a texture of a given color space onto an sRGB (gamma-encoded) target.
+struct TextureColorTransform {
+  /// Rows of the 3x3 gamut conversion matrix; identity when none is needed.
+  Vector3 row0 = {1.0f, 0.0f, 0.0f};
+  Vector3 row1 = {0.0f, 1.0f, 0.0f};
+  Vector3 row2 = {0.0f, 0.0f, 1.0f};
+  /// Whether the source is linear and needs the sRGB transfer function.
+  bool gamma_encode = false;
+};
+
+/// Display P3 sources are converted to sRGB primaries; linear sources
+/// (kLinearDisplayP3, kLinearP3Native) are sRGB-encoded.
+TextureColorTransform GetTextureColorTransform(ColorSpace source);
 
 class Texture;
 

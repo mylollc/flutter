@@ -47,6 +47,8 @@ executable("flutter_shell_native_unittests") {
     "android_shell_holder_unittests.cc",
     "apk_asset_provider_unittests.cc",
     "flutter_shell_native_unittests.cc",
+    "image_external_texture_gpu_unittests.cc",
+    "image_external_texture_unittests.cc",
     "image_lru_unittests.cc",
     "platform_view_android_unittests.cc",
   ]
@@ -293,6 +295,7 @@ android_java_sources = [
   "io/flutter/embedding/engine/plugins/service/ServicePluginBinding.java",
   "io/flutter/embedding/engine/plugins/util/GeneratedPluginRegister.java",
   "io/flutter/embedding/engine/renderer/FlutterRenderer.java",
+  "io/flutter/embedding/engine/renderer/FlutterSurfaceDynamicRangeListener.java",
   "io/flutter/embedding/engine/renderer/FlutterUiDisplayListener.java",
   "io/flutter/embedding/engine/renderer/FlutterUiResizeListener.java",
   "io/flutter/embedding/engine/renderer/RenderSurface.java",

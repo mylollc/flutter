@@ -20,7 +20,8 @@ class ImageExternalTextureGLSkia : public ImageExternalTextureGL {
       int64_t id,
       const fml::jni::ScopedJavaGlobalRef<jobject>& image_textury_entry,
       const std::shared_ptr<PlatformViewAndroidJNI>& jni_facade,
-      ImageExternalTexture::ImageLifecycle lifecycle);
+      ImageExternalTexture::ImageLifecycle lifecycle,
+      fml::RefPtr<fml::TaskRunner> raster_task_runner);
 
  private:
   // |ImageExternalTexture|
@@ -30,11 +31,11 @@ class ImageExternalTextureGLSkia : public ImageExternalTextureGL {
   void Detach() override;
 
   // |ImageExternalTextureGL|
-  sk_sp<flutter::DlImage> CreateDlImage(
-      PaintContext& context,
-      const SkRect& bounds,
-      std::optional<HardwareBufferKey> id,
-      impeller::UniqueEGLImageKHR&& egl_image) override;
+  sk_sp<flutter::DlImage> CreateDlImage(PaintContext& context,
+                                        const SkRect& bounds,
+                                        std::optional<HardwareBufferKey> id,
+                                        impeller::UniqueEGLImageKHR&& egl_image,
+                                        const BufferInfo& info) override;
 
   void BindImageToTexture(const impeller::UniqueEGLImageKHR& image, GLuint tex);
 

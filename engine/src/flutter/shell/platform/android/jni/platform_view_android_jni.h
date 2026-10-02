@@ -34,26 +34,25 @@ using JavaLocalRef = std::nullptr_t;
 using AHardwareBuffer = struct AHardwareBuffer;
 #endif
 
-/// Plain-data handle for a raw `AHardwareBuffer` + its acquire fence +
-/// release-ack fd, returned by
+/// Plain-data handle for a raw `AHardwareBuffer` + its acquire fence,
+/// returned by
 /// [PlatformViewAndroidJNI::ImageProducerTextureEntryAcquireLatestHardwareBuffer].
 ///
 /// Ownership contract: the engine transfers one AHB reference to the
 /// consumer on acquisition. The consumer must eventually release it via
-/// `AHardwareBuffer_release`. Both fds (when not -1) are transferred too:
+/// `AHardwareBuffer_release`. The `acquire_fence_fd` (when not -1) is
+/// transferred too: the consumer waits on it before sampling, then closes it.
 ///
-/// - `acquire_fence_fd`: consumer waits on it (or imports into a Vulkan
-///   semaphore) before sampling, then closes.
-/// - `release_ack_fd`: consumer signals it (`write(fd, &u64, 8)`, matching
-///   the producer's `eventfd`) when GPU sampling completes, then closes.
-///   This unblocks the producer so it can safely reuse the AHB. When
-///   the consumer never reaches the sampling path (early-return / error),
-///   it must still signal+close the ack fd — otherwise the producer
-///   polls forever.
+/// Every acquired buffer must eventually be handed back to its producer
+/// through
+/// [PlatformViewAndroidJNI::ImageProducerTextureEntryOnHardwareBufferReleased],
+/// once the consumer has stopped sampling it.
 struct AcquiredHardwareBuffer {
   AHardwareBuffer* buffer = nullptr;
   int acquire_fence_fd = -1;
-  int release_ack_fd = -1;
+  /// Whether the producer listens for this buffer's release. When false the
+  /// consumer skips release fences and the release callback for it.
+  bool wants_release = true;
   /// Producer-declared color space (TextureRegistry.ImageTextureEntry's
   /// COLOR_SPACE_* codes, matching impeller::ColorSpace; -1 == UNSPECIFIED,
   /// meaning infer from the buffer's pixel format).
@@ -127,6 +126,16 @@ class PlatformViewAndroidJNI {
   virtual void FlutterViewOnFirstFrame() = 0;
 
   //----------------------------------------------------------------------------
+  /// @brief      Reports whether the surface Flutter renders into stores
+  ///             extended-range (F16) color. Called each time the onscreen
+  ///             surface is created or changes, and with false when it is
+  ///             destroyed.
+  ///
+  /// @note       Must be called from the platform thread.
+  ///
+  virtual void FlutterViewOnSurfaceDynamicRangeChanged(bool extended_range) = 0;
+
+  //----------------------------------------------------------------------------
   /// @brief      Indicates that a hot restart is about to happen.
   ///
   virtual void FlutterViewOnPreEngineRestart() = 0;
@@ -188,6 +197,21 @@ class PlatformViewAndroidJNI {
       JavaLocalRef image_texture_entry) {
     return AcquiredHardwareBuffer{};
   }
+
+  //----------------------------------------------------------------------------
+  /// @brief      Tell the producer of `buffer` (a buffer returned by
+  ///             `ImageProducerTextureEntryAcquireLatestHardwareBuffer`) that
+  ///             the engine is done with it. Calls the Java
+  ///             `ImageConsumer.onHardwareBufferReleased`.
+  ///
+  ///             Takes ownership of `release_fence_fd`: a sync fence that
+  ///             signals once the GPU has finished every read of `buffer`, or
+  ///             -1 when it may be overwritten immediately.
+  ///
+  virtual void ImageProducerTextureEntryOnHardwareBufferReleased(
+      JavaLocalRef image_texture_entry,
+      AHardwareBuffer* buffer,
+      int release_fence_fd) = 0;
 
   //----------------------------------------------------------------------------
   /// @brief      Grab the HardwareBuffer from image.

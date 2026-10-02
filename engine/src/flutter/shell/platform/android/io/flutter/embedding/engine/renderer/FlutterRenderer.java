@@ -23,6 +23,7 @@ import androidx.annotation.Keep;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.annotation.RequiresApi;
+import androidx.annotation.UiThread;
 import androidx.annotation.VisibleForTesting;
 import io.flutter.Log;
 import io.flutter.embedding.engine.FlutterJNI;
@@ -164,6 +165,37 @@ public class FlutterRenderer implements TextureRegistry {
    */
   public void removeIsDisplayingFlutterUiListener(@NonNull FlutterUiDisplayListener listener) {
     flutterJNI.removeIsDisplayingFlutterUiListener(listener);
+  }
+
+  /**
+   * Whether the surface this {@code FlutterRenderer} renders into stores extended-range (F16)
+   * color, so content brighter than SDR white reaches the display. {@code false} for an SDR
+   * surface, which clips such content: always on the OpenGL ES backend, and on Vulkan devices
+   * without an F16 swapchain. Also {@code false} before the first surface is created and after it
+   * is destroyed. Main thread only, like the listener methods below.
+   */
+  @UiThread
+  public boolean isSurfaceExtendedRange() {
+    return flutterJNI.isSurfaceExtendedRange();
+  }
+
+  /**
+   * Adds a listener that is told when the dynamic range of the surface this {@code FlutterRenderer}
+   * renders into changes. See {@link #isSurfaceExtendedRange()}.
+   */
+  @UiThread
+  public void addSurfaceDynamicRangeListener(@NonNull FlutterSurfaceDynamicRangeListener listener) {
+    flutterJNI.addSurfaceDynamicRangeListener(listener);
+  }
+
+  /**
+   * Removes a listener added via {@link
+   * #addSurfaceDynamicRangeListener(FlutterSurfaceDynamicRangeListener)}.
+   */
+  @UiThread
+  public void removeSurfaceDynamicRangeListener(
+      @NonNull FlutterSurfaceDynamicRangeListener listener) {
+    flutterJNI.removeSurfaceDynamicRangeListener(listener);
   }
 
   private void clearDeadListeners() {
@@ -1012,11 +1044,17 @@ public class FlutterRenderer implements TextureRegistry {
     // dropped on swap.
     private long pendingAhbPtr; // 0 == no pending AHardwareBuffer
     private int pendingAcquireFenceFd = -1;
-    private int pendingReleaseAckFd = -1;
     // Producer-declared color space for the pending AHardwareBuffer (one of
     // TextureRegistry.ImageTextureEntry.COLOR_SPACE_*). Set on push, consumed on
     // acquire; UNSPECIFIED lets the engine infer from the buffer format.
     private int pendingColorSpace = TextureRegistry.ImageTextureEntry.COLOR_SPACE_UNSPECIFIED;
+
+    // Told when the engine is done with each pushed AHardwareBuffer. Called
+    // from producer threads (superseded pushes) and the raster thread
+    // (sampled buffers), hence volatile.
+    @Nullable
+    private volatile TextureRegistry.OnHardwareBufferReleasedListener
+        hardwareBufferReleasedListener;
 
     // Cached Runnable that posts `scheduleEngineFrame()` onto the main
     // handler. Stored as a field (rather than allocating on each off-main
@@ -1043,17 +1081,7 @@ public class FlutterRenderer implements TextureRegistry {
         image.close();
         image = null;
       }
-      // Release any pending AHardwareBuffer-direct state. The native release
-      // closes the acquire fence fd, signals+closes the release-ack fd (so
-      // any producer still polling it wakes up), and drops our reference on
-      // the AHardwareBuffer via AHardwareBuffer_release.
-      if (pendingAhbPtr != 0 || pendingAcquireFenceFd >= 0 || pendingReleaseAckFd >= 0) {
-        flutterJNI.releaseHardwareBuffer(
-            pendingAhbPtr, pendingAcquireFenceFd, pendingReleaseAckFd);
-        pendingAhbPtr = 0;
-        pendingAcquireFenceFd = -1;
-        pendingReleaseAckFd = -1;
-      }
+      dropPendingHardwareBuffer();
       unregisterTexture(id);
     }
 
@@ -1063,28 +1091,17 @@ public class FlutterRenderer implements TextureRegistry {
         return;
       }
       Image toClose;
-      long droppedAhb;
-      int droppedFenceFd;
-      int droppedReleaseAckFd;
       synchronized (this) {
         toClose = this.image;
         this.image = image;
-        // Swapping modes: Image flow takes over. Any pending
-        // AHardwareBuffer state must be released by native code.
-        droppedAhb = this.pendingAhbPtr;
-        droppedFenceFd = this.pendingAcquireFenceFd;
-        droppedReleaseAckFd = this.pendingReleaseAckFd;
-        this.pendingAhbPtr = 0;
-        this.pendingAcquireFenceFd = -1;
-        this.pendingReleaseAckFd = -1;
       }
       if (toClose != null) {
         Log.e(TAG, "Dropping PlatformView Frame");
         toClose.close();
       }
-      if (droppedAhb != 0 || droppedFenceFd >= 0 || droppedReleaseAckFd >= 0) {
-        flutterJNI.releaseHardwareBuffer(droppedAhb, droppedFenceFd, droppedReleaseAckFd);
-      }
+      // Swapping modes: the Image flow takes over, so any pending
+      // AHardwareBuffer is dropped unsampled.
+      dropPendingHardwareBuffer();
       if (image != null) {
         scheduleEngineFrame();
       }
@@ -1093,50 +1110,40 @@ public class FlutterRenderer implements TextureRegistry {
     @Override
     @RequiresApi(API_LEVELS.API_26)
     public void pushHardwareBuffer(
-        long ahbPtr, int acquireFenceFd, int releaseAckFd, int colorSpace) {
+        long ahbPtr,
+        int acquireFenceFd,
+        @TextureRegistry.ImageTextureEntry.ColorSpace int colorSpace) {
       if (ahbPtr == 0) {
         throw new IllegalArgumentException(
             "pushHardwareBuffer: ahbPtr must be a non-zero AHardwareBuffer*");
       }
       if (released) {
-        // The producer transferred ownership of the AHardwareBuffer
-        // reference to us — we must release it even though the entry
-        // is gone (otherwise the AHB leaks). If the producer also
-        // supplied a releaseAckFd, signal+close it synchronously so
-        // they don't block forever on a destroyed entry.
-        if (ahbPtr != 0 || acquireFenceFd >= 0 || releaseAckFd >= 0) {
-          flutterJNI.releaseHardwareBuffer(ahbPtr, acquireFenceFd, releaseAckFd);
-        }
+        // The producer transferred a reference on the AHardwareBuffer to us,
+        // so it must be released even though the entry is gone, and the
+        // producer told the buffer is free.
+        releaseUnsampledHardwareBuffer(ahbPtr, acquireFenceFd);
         return;
       }
       Image toClose;
       long droppedAhb;
       int droppedFenceFd;
-      int droppedReleaseAckFd;
       synchronized (this) {
         // Swap-on-mode-change mirror image of pushImage: adopting the
         // AHardwareBuffer flow drops any pending Image (if one somehow lingers).
         toClose = this.image;
         this.image = null;
-        // Capture the currently-pending AHardwareBuffer before overwriting
-        // so the native release hook can free it + signal+close its
-        // releaseAck fd (the engine never sampled it, so signaling is
-        // correct — producer gets the ack immediately).
+        // A still-pending AHardwareBuffer was never sampled: it is superseded.
         droppedAhb = this.pendingAhbPtr;
         droppedFenceFd = this.pendingAcquireFenceFd;
-        droppedReleaseAckFd = this.pendingReleaseAckFd;
         this.pendingAhbPtr = ahbPtr;
         this.pendingAcquireFenceFd = acquireFenceFd;
-        this.pendingReleaseAckFd = releaseAckFd;
         this.pendingColorSpace = colorSpace;
       }
       if (toClose != null) {
         Log.e(TAG, "Dropping PlatformView Frame");
         toClose.close();
       }
-      if (droppedAhb != 0 || droppedFenceFd >= 0 || droppedReleaseAckFd >= 0) {
-        flutterJNI.releaseHardwareBuffer(droppedAhb, droppedFenceFd, droppedReleaseAckFd);
-      }
+      releaseUnsampledHardwareBuffer(droppedAhb, droppedFenceFd);
       // `scheduleEngineFrame()` is `@UiThread` (it calls
       // `FlutterJNI.scheduleFrame`), but direct-AHB producers run on
       // arbitrary native worker threads. Post to the main handler when
@@ -1147,6 +1154,63 @@ public class FlutterRenderer implements TextureRegistry {
         scheduleEngineFrame();
       } else {
         handler.post(scheduleFrameRunnable);
+      }
+    }
+
+    @Override
+    @RequiresApi(API_LEVELS.API_26)
+    public void setOnHardwareBufferReleasedListener(
+        @Nullable TextureRegistry.OnHardwareBufferReleasedListener listener) {
+      hardwareBufferReleasedListener = listener;
+    }
+
+    @Override
+    @RequiresApi(API_LEVELS.API_26)
+    public void onHardwareBufferReleased(long ahbPtr, int releaseFenceFd) {
+      TextureRegistry.OnHardwareBufferReleasedListener listener = hardwareBufferReleasedListener;
+      if (listener == null) {
+        TextureRegistry.ImageConsumer.super.onHardwareBufferReleased(ahbPtr, releaseFenceFd);
+        return;
+      }
+      try {
+        listener.onHardwareBufferReleased(ahbPtr, releaseFenceFd);
+      } catch (Throwable t) {
+        // The listener owns the fence even when it throws; don't let the
+        // failure reach the raster thread or the pushing producer.
+        Log.e(TAG, "OnHardwareBufferReleasedListener threw", t);
+      }
+    }
+
+    // Releases the pending AHardwareBuffer, if any, without it being sampled.
+    private void dropPendingHardwareBuffer() {
+      dropPendingHardwareBuffer(/* notifyListener= */ true);
+    }
+
+    private void dropPendingHardwareBuffer(boolean notifyListener) {
+      long droppedAhb;
+      int droppedFenceFd;
+      synchronized (this) {
+        droppedAhb = this.pendingAhbPtr;
+        droppedFenceFd = this.pendingAcquireFenceFd;
+        this.pendingAhbPtr = 0;
+        this.pendingAcquireFenceFd = -1;
+      }
+      if (notifyListener) {
+        releaseUnsampledHardwareBuffer(droppedAhb, droppedFenceFd);
+      } else if (droppedAhb != 0 || droppedFenceFd >= 0) {
+        flutterJNI.releaseHardwareBuffer(droppedAhb, droppedFenceFd);
+      }
+    }
+
+    // Drops the engine's reference on a pushed AHardwareBuffer the engine never
+    // sampled, closes its acquire fence, and tells the producer it is free now.
+    private void releaseUnsampledHardwareBuffer(long ahbPtr, int acquireFenceFd) {
+      if (ahbPtr == 0 && acquireFenceFd < 0) {
+        return;
+      }
+      flutterJNI.releaseHardwareBuffer(ahbPtr, acquireFenceFd);
+      if (ahbPtr != 0) {
+        onHardwareBufferReleased(ahbPtr, /* releaseFenceFd= */ -1);
       }
     }
 
@@ -1196,22 +1260,20 @@ public class FlutterRenderer implements TextureRegistry {
     public TextureRegistry.HardwareBufferHandle acquireLatestHardwareBuffer() {
       long ahb;
       int fenceFd;
-      int releaseAckFd;
       int colorSpace;
       synchronized (this) {
         ahb = this.pendingAhbPtr;
         fenceFd = this.pendingAcquireFenceFd;
-        releaseAckFd = this.pendingReleaseAckFd;
         colorSpace = this.pendingColorSpace;
         this.pendingAhbPtr = 0;
         this.pendingAcquireFenceFd = -1;
-        this.pendingReleaseAckFd = -1;
         this.pendingColorSpace = TextureRegistry.ImageTextureEntry.COLOR_SPACE_UNSPECIFIED;
       }
       if (ahb == 0) {
         return null;
       }
-      return new TextureRegistry.HardwareBufferHandle(ahb, fenceFd, releaseAckFd, colorSpace);
+      return new TextureRegistry.HardwareBufferHandle(
+          ahb, fenceFd, colorSpace, hardwareBufferReleasedListener != null);
     }
 
     @Override
@@ -1225,13 +1287,8 @@ public class FlutterRenderer implements TextureRegistry {
           image.close();
           image = null;
         }
-        if (pendingAhbPtr != 0 || pendingAcquireFenceFd >= 0 || pendingReleaseAckFd >= 0) {
-          flutterJNI.releaseHardwareBuffer(
-              pendingAhbPtr, pendingAcquireFenceFd, pendingReleaseAckFd);
-          pendingAhbPtr = 0;
-          pendingAcquireFenceFd = -1;
-          pendingReleaseAckFd = -1;
-        }
+        // No listener calls from the finalizer thread.
+        dropPendingHardwareBuffer(/* notifyListener= */ false);
         released = true;
         handler.post(new TextureFinalizerRunnable(id, flutterJNI));
       } finally {

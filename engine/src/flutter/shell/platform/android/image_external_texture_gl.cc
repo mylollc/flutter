@@ -7,7 +7,11 @@
 #include <android/hardware_buffer_jni.h>
 #include <android/sensor.h>
 
+#include <cstring>
+
 #include "flutter/common/graphics/texture.h"
+#include "flutter/fml/closure.h"
+#include "flutter/fml/logging.h"
 #include "flutter/impeller/core/formats.h"
 #include "flutter/impeller/display_list/dl_image_impeller.h"
 #include "flutter/impeller/toolkit/android/hardware_buffer.h"
@@ -21,12 +25,133 @@
 
 namespace flutter {
 
+namespace {
+
+using DupNativeFenceFDProc = EGLint (*)(EGLDisplay, EGLSyncKHR);
+using WaitSyncProc = EGLint (*)(EGLDisplay, EGLSyncKHR, EGLint);
+
+// `eglDupNativeFenceFDANDROID` is missing from the NDK's libEGL stubs (and
+// `eglWaitSyncKHR` from older ones), so both are resolved at runtime.
+DupNativeFenceFDProc GetDupNativeFenceFDProc() {
+  static const DupNativeFenceFDProc proc =
+      reinterpret_cast<DupNativeFenceFDProc>(
+          eglGetProcAddress("eglDupNativeFenceFDANDROID"));
+  return proc;
+}
+
+WaitSyncProc GetWaitSyncProc() {
+  static const WaitSyncProc proc =
+      reinterpret_cast<WaitSyncProc>(eglGetProcAddress("eglWaitSyncKHR"));
+  return proc;
+}
+
+// Whether `display` can import and export native (sync fd) fences.
+bool SupportsNativeFenceSync(EGLDisplay display) {
+  static EGLDisplay checked_display = EGL_NO_DISPLAY;
+  static bool supported = false;
+  if (display != checked_display) {
+    const char* extensions = eglQueryString(display, EGL_EXTENSIONS);
+    supported =
+        extensions != nullptr &&
+        std::strstr(extensions, "EGL_ANDROID_native_fence_sync") != nullptr &&
+        std::strstr(extensions, "EGL_KHR_wait_sync") != nullptr &&
+        GetDupNativeFenceFDProc() != nullptr && GetWaitSyncProc() != nullptr;
+    checked_display = display;
+  }
+  return supported;
+}
+
+// Makes release fences on the raster thread's current (onscreen) context,
+// on which every frame's draws are issued.
+class GLReleaseFenceMaker final : public ReleaseFenceMaker {
+ public:
+  ReleaseFence Create(const std::vector<std::shared_ptr<void>>& images,
+                      bool want_fence) override {
+    if (!want_fence) {
+      return {};
+    }
+    EGLDisplay display = eglGetCurrentDisplay();
+    if (display == EGL_NO_DISPLAY || eglGetCurrentContext() == EGL_NO_CONTEXT) {
+      // Only during teardown: the frames that drew the buffers were issued
+      // on a context that is gone, so their work is complete.
+      return {};
+    }
+
+    if (SupportsNativeFenceSync(display)) {
+      const EGLint attributes[] = {EGL_SYNC_NATIVE_FENCE_FD_ANDROID,
+                                   EGL_NO_NATIVE_FENCE_FD_ANDROID, EGL_NONE};
+      EGLSyncKHR sync =
+          eglCreateSyncKHR(display, EGL_SYNC_NATIVE_FENCE_ANDROID, attributes);
+      if (sync != EGL_NO_SYNC_KHR) {
+        // The fence's fd only exists once the fence command is flushed.
+        glFlush();
+        const EGLint fd = GetDupNativeFenceFDProc()(display, sync);
+        eglDestroySyncKHR(display, sync);
+        if (fd != EGL_NO_NATIVE_FENCE_FD_ANDROID) {
+          return {.fd = fd};
+        }
+      }
+    }
+
+    // No fence to hand over: check an EGL fence until it signals.
+    EGLSyncKHR sync = eglCreateSyncKHR(display, EGL_SYNC_FENCE_KHR, nullptr);
+    if (sync == EGL_NO_SYNC_KHR) {
+      // No fences at all (EGL_KHR_fence_sync is near universal).
+      glFinish();
+      return {};
+    }
+    glFlush();
+    std::shared_ptr<void> fence(
+        sync, [display](void* sync) { eglDestroySyncKHR(display, sync); });
+    return {.is_done = [display, fence]() {
+      return eglClientWaitSyncKHR(display, fence.get(), 0, 0) !=
+             EGL_TIMEOUT_EXPIRED_KHR;
+    }};
+  }
+};
+
+// Make this context's later commands wait, on the GPU, for a producer's
+// acquire fence. Takes ownership of `fd`.
+void WaitForAcquireFence(int fd) {
+  if (fd < 0) {
+    return;
+  }
+  EGLDisplay display = eglGetCurrentDisplay();
+  if (display != EGL_NO_DISPLAY && SupportsNativeFenceSync(display)) {
+    const EGLint attributes[] = {EGL_SYNC_NATIVE_FENCE_FD_ANDROID, fd,
+                                 EGL_NONE};
+    EGLSyncKHR sync =
+        eglCreateSyncKHR(display, EGL_SYNC_NATIVE_FENCE_ANDROID, attributes);
+    if (sync != EGL_NO_SYNC_KHR) {
+      // The sync owns `fd` now.
+      if (GetWaitSyncProc()(display, sync, 0) != EGL_TRUE) {
+        FML_LOG(ERROR) << "eglWaitSyncKHR failed; waiting on the CPU.";
+        eglClientWaitSyncKHR(display, sync, 0, EGL_FOREVER_KHR);
+      }
+      eglDestroySyncKHR(display, sync);
+      return;
+    }
+  }
+  ImageExternalTexture::WaitOnAndCloseSyncFd(fd);
+}
+
+}  // namespace
+
 ImageExternalTextureGL::ImageExternalTextureGL(
     int64_t id,
     const fml::jni::ScopedJavaGlobalRef<jobject>& image_texture_entry,
     const std::shared_ptr<PlatformViewAndroidJNI>& jni_facade,
-    ImageExternalTexture::ImageLifecycle lifecycle)
-    : ImageExternalTexture(id, image_texture_entry, jni_facade, lifecycle) {}
+    ImageExternalTexture::ImageLifecycle lifecycle,
+    fml::RefPtr<fml::TaskRunner> raster_task_runner)
+    : ImageExternalTexture(id,
+                           image_texture_entry,
+                           jni_facade,
+                           lifecycle,
+                           std::move(raster_task_runner)) {}
+
+ImageExternalTextureGL::~ImageExternalTextureGL() {
+  SetSampledHardwareBuffer(nullptr);
+}
 
 void ImageExternalTextureGL::Attach(PaintContext& context) {
   if (state_ == AttachmentState::kUninitialized) {
@@ -41,39 +166,94 @@ void ImageExternalTextureGL::Attach(PaintContext& context) {
   }
 }
 
-void ImageExternalTextureGL::UpdateImage(JavaLocalRef& hardware_buffer,
+bool ImageExternalTextureGL::UpdateImage(JavaLocalRef& hardware_buffer,
                                          const SkRect& bounds,
                                          PaintContext& context) {
-  AHardwareBuffer* latest_hardware_buffer = AHardwareBufferFor(hardware_buffer);
+  return UpdateImage(AHardwareBufferFor(hardware_buffer), bounds, context,
+                     BufferInfo{});
+}
+
+bool ImageExternalTextureGL::UpdateImage(AHardwareBuffer* hardware_buffer,
+                                         const SkRect& bounds,
+                                         PaintContext& context,
+                                         const BufferInfo& info) {
   std::optional<HardwareBufferKey> key =
-      impeller::android::HardwareBuffer::GetSystemUniqueID(
-          latest_hardware_buffer);
+      impeller::android::HardwareBuffer::GetSystemUniqueID(hardware_buffer);
   auto existing_image = image_lru_.FindImage(key);
   if (existing_image != nullptr) {
     dl_image_ = existing_image;
-    return;
+    return true;
   }
 
-  auto egl_image = CreateEGLImage(latest_hardware_buffer);
+  auto egl_image = CreateEGLImage(hardware_buffer);
   if (!egl_image.is_valid()) {
-    return;
+    return false;
   }
 
-  dl_image_ = CreateDlImage(context, bounds, key, std::move(egl_image));
+  auto image = CreateDlImage(context, bounds, key, std::move(egl_image), info);
+  if (image == nullptr) {
+    return false;
+  }
+  dl_image_ = std::move(image);
   if (key.has_value()) {
     gl_entries_.erase(image_lru_.AddImage(dl_image_, key.value()));
   }
+  return true;
 }
 
 void ImageExternalTextureGL::ProcessFrame(PaintContext& context,
                                           const SkRect& bounds) {
+  // Prefer the direct-AHB path: a producer on `pushHardwareBuffer` leaves the
+  // `Image` slot empty. Falling through to the `Image` path when no raw AHB
+  // is pending keeps producers that push via `pushImage` working.
+  AcquiredHardwareBuffer direct = AcquireLatestHardwareBuffer();
+  if (direct.buffer != nullptr) {
+    IngestHardwareBuffer(direct, bounds, context);
+    return;
+  }
+
   JavaLocalRef image = AcquireLatestImage();
   if (image.is_null()) {
     return;
   }
   JavaLocalRef hardware_buffer = HardwareBufferFor(image);
-  UpdateImage(hardware_buffer, bounds, context);
+  if (UpdateImage(hardware_buffer, bounds, context)) {
+    SetSampledHardwareBuffer(nullptr);
+  }
   CloseHardwareBuffer(hardware_buffer);
+}
+
+void ImageExternalTextureGL::IngestHardwareBuffer(AcquiredHardwareBuffer direct,
+                                                  const SkRect& bounds,
+                                                  PaintContext& context) {
+  // Make this frame's draws wait for the producer's writes.
+  WaitForAcquireFence(direct.acquire_fence_fd);
+  direct.acquire_fence_fd = -1;
+
+  // Drop the transferred AHB reference on every exit. The EGLImage made on a
+  // cache miss holds its own reference.
+  fml::ScopedCleanupClosure cleanup(
+      [this, direct]() { ReleaseAcquiredHardwareBuffer(direct); });
+
+  BufferInfo info;
+  info.color_space = direct.color_space;
+  auto desc = impeller::android::HardwareBuffer::Describe(direct.buffer);
+  if (desc.has_value()) {
+    info.size = impeller::ISize(desc->width, desc->height);
+    info.format = desc->format;
+  }
+  if (UpdateImage(direct.buffer, bounds, context, info)) {
+    SetSampledHardwareBuffer(direct.buffer, /*image=*/nullptr,
+                             direct.wants_release);
+  } else {
+    // Never sampled; the previous buffer stays on screen.
+    ReleaseUnsampled(direct.buffer);
+  }
+}
+
+std::unique_ptr<ReleaseFenceMaker>
+ImageExternalTextureGL::CreateReleaseFenceMaker() {
+  return std::make_unique<GLReleaseFenceMaker>();
 }
 
 void ImageExternalTextureGL::Detach() {

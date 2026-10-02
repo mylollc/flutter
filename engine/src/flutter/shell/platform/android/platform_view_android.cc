@@ -199,21 +199,27 @@ void PlatformViewAndroid::NotifyCreated(
   }
 
   PlatformView::NotifyCreated();
+  // The rasterizer creates the GPU surface, and with it (for an autoselected
+  // backend) the swapchain, in `NotifyCreated`, so it is read afterwards.
+  ReportSurfaceDynamicRange();
 }
 
 void PlatformViewAndroid::NotifySurfaceWindowChanged(
     fml::RefPtr<AndroidNativeWindow> native_window) {
   if (android_surface_) {
     fml::AutoResetWaitableEvent latch;
+    bool extended_range = false;
     fml::TaskRunner::RunNowOrPostTask(
         task_runners_.GetRasterTaskRunner(),
-        [&latch, surface = android_surface_.get(),
+        [&latch, &extended_range, surface = android_surface_.get(),
          native_window = std::move(native_window), jni_facade = jni_facade_]() {
           surface->TeardownOnScreenContext();
           surface->SetNativeWindow(native_window, jni_facade);
+          extended_range = surface->IsExtendedRange();
           latch.Signal();
         });
     latch.Wait();
+    jni_facade_->FlutterViewOnSurfaceDynamicRangeChanged(extended_range);
   }
 
   PlatformView::ScheduleFrame();
@@ -231,6 +237,8 @@ void PlatformViewAndroid::NotifyDestroyed() {
           latch.Signal();
         });
     latch.Wait();
+    // No surface, so nothing reaches the display.
+    jni_facade_->FlutterViewOnSurfaceDynamicRangeChanged(false);
   }
 }
 
@@ -393,7 +401,8 @@ void PlatformViewAndroid::RegisterImageTexture(
       // Legacy GL.
       RegisterTexture(std::make_shared<ImageExternalTextureGLSkia>(
           std::static_pointer_cast<AndroidContextGLSkia>(android_context_),
-          texture_id, image_texture_entry, jni_facade_, lifecycle));
+          texture_id, image_texture_entry, jni_facade_, lifecycle,
+          task_runners_.GetRasterTaskRunner()));
       break;
     case AndroidRenderingAPI::kSoftware:
       FML_LOG(INFO) << "Software rendering does not support external textures.";
@@ -404,13 +413,15 @@ void PlatformViewAndroid::RegisterImageTexture(
       RegisterTexture(std::make_shared<ImageExternalTextureGLImpeller>(
           std::static_pointer_cast<impeller::ContextGLES>(
               android_context_->GetImpellerContext()),
-          texture_id, image_texture_entry, jni_facade_, lifecycle));
+          texture_id, image_texture_entry, jni_facade_, lifecycle,
+          task_runners_.GetRasterTaskRunner()));
       break;
     case AndroidRenderingAPI::kImpellerVulkan:
       RegisterTexture(std::make_shared<ImageExternalTextureVKImpeller>(
           std::static_pointer_cast<impeller::ContextVK>(
               android_context_->GetImpellerContext()),
-          texture_id, image_texture_entry, jni_facade_, lifecycle));
+          texture_id, image_texture_entry, jni_facade_, lifecycle,
+          task_runners_.GetRasterTaskRunner()));
       break;
     case AndroidRenderingAPI::kImpellerAutoselect:
       FML_CHECK(false);
@@ -548,6 +559,22 @@ void PlatformViewAndroid::InstallFirstFrameCallback() {
 
 void PlatformViewAndroid::FireFirstFrameCallback() {
   jni_facade_->FlutterViewOnFirstFrame();
+}
+
+void PlatformViewAndroid::ReportSurfaceDynamicRange() {
+  if (!android_surface_) {
+    return;
+  }
+  bool extended_range = false;
+  fml::AutoResetWaitableEvent latch;
+  fml::TaskRunner::RunNowOrPostTask(
+      task_runners_.GetRasterTaskRunner(),
+      [&latch, &extended_range, surface = android_surface_.get()]() {
+        extended_range = surface->IsExtendedRange();
+        latch.Signal();
+      });
+  latch.Wait();
+  jni_facade_->FlutterViewOnSurfaceDynamicRangeChanged(extended_range);
 }
 
 double PlatformViewAndroid::GetScaledFontSize(double unscaled_font_size,

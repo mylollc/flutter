@@ -21,4 +21,8 @@ std::shared_ptr<impeller::Context> AndroidSurface::GetImpellerContext() {
 
 void AndroidSurface::SetupImpellerSurface() {}
 
+bool AndroidSurface::IsExtendedRange() const {
+  return false;
+}
+
 }  // namespace flutter

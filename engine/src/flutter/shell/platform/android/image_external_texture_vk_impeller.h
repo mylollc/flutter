@@ -11,6 +11,7 @@
 
 #include "flutter/impeller/renderer/backend/vulkan/android/ahb_texture_source_vk.h"
 #include "flutter/impeller/renderer/backend/vulkan/context_vk.h"
+#include "flutter/impeller/renderer/backend/vulkan/texture_vk.h"
 #include "flutter/impeller/renderer/backend/vulkan/vk.h"
 #include "flutter/shell/platform/android/android_context_vk_impeller.h"
 
@@ -24,7 +25,8 @@ class ImageExternalTextureVKImpeller : public ImageExternalTexture {
       const fml::jni::ScopedJavaGlobalRef<jobject>&
           hardware_buffer_texture_entry,
       const std::shared_ptr<PlatformViewAndroidJNI>& jni_facade,
-      ImageExternalTexture::ImageLifecycle lifecycle);
+      ImageExternalTexture::ImageLifecycle lifecycle,
+      fml::RefPtr<fml::TaskRunner> raster_task_runner);
 
   ~ImageExternalTextureVKImpeller() override;
 
@@ -33,32 +35,27 @@ class ImageExternalTextureVKImpeller : public ImageExternalTexture {
   void ProcessFrame(PaintContext& context, const SkRect& bounds) override;
   void Detach() override;
 
+  // |ImageExternalTexture|
+  std::unique_ptr<ReleaseFenceMaker> CreateReleaseFenceMaker() override;
+
   /// Shared Vulkan pipeline work for both `pushImage` and
   /// `pushHardwareBuffer` intake paths: LRU lookup, `AHBTextureSourceVK`
-  /// construction, and the shader-read layout transition. Caller-level
-  /// cleanup of the Java `HardwareBuffer` wrapper or the transferred
+  /// construction, and the transition to shader read. Caller-level cleanup
+  /// of the Java `HardwareBuffer` wrapper or the transferred
   /// `AHardwareBuffer` reference runs via `fml::ScopedCleanupClosure` in
   /// `ProcessFrame`.
   ///
-  /// `release_ack_fd` is the producer's `eventfd` (or `-1`). This
-  /// function takes ownership: on every exit path the fd is either
-  /// signaled+closed immediately (early return / error) or stashed in
-  /// `pending_release_ack_fd_`, to be signaled the next time
-  /// `IngestHardwareBuffer` is called (or the texture is destroyed).
-  /// This one-frame delay gives the compositor's render pass from the
-  /// previous `Ingest` time to finish sampling the old AHB before the
-  /// producer reuses the slot — a tighter binding (signaling on the
-  /// actual composite completion) would need Impeller-side hooks we
-  /// don't have today. After return the caller must NOT touch the fd.
   /// `color_space` is the producer-declared color-space code (impeller
   /// ColorSpace; -1 == unspecified, infer from the buffer format).
-  void IngestHardwareBuffer(AHardwareBuffer* ahb,
-                            int release_ack_fd,
-                            int color_space);
-
-  /// One-frame-deferred release-ack fd. See `IngestHardwareBuffer` doc
-  /// for the reasoning. `-1` when no frame is pending.
-  int pending_release_ack_fd_ = -1;
+  /// `acquire_ownership` takes the image from the producer's foreign queue
+  /// family, for buffers that are handed back to it on release.
+  ///
+  /// Returns the texture now drawn, or nullptr (with `dl_image_` unchanged)
+  /// on failure.
+  std::shared_ptr<impeller::TextureVK> IngestHardwareBuffer(
+      AHardwareBuffer* ahb,
+      int color_space,
+      bool acquire_ownership);
 
   const std::shared_ptr<impeller::ContextVK> impeller_context_;
 };

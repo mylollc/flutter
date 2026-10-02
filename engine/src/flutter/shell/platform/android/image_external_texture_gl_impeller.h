@@ -23,7 +23,8 @@ class ImageExternalTextureGLImpeller : public ImageExternalTextureGL {
       const fml::jni::ScopedJavaGlobalRef<jobject>&
           hardware_buffer_texture_entry,
       const std::shared_ptr<PlatformViewAndroidJNI>& jni_facade,
-      ImageExternalTexture::ImageLifecycle lifecycle);
+      ImageExternalTexture::ImageLifecycle lifecycle,
+      fml::RefPtr<fml::TaskRunner> raster_task_runner);
 
  private:
   // |ImageExternalTexture|
@@ -33,11 +34,11 @@ class ImageExternalTextureGLImpeller : public ImageExternalTextureGL {
   void Detach() override;
 
   // |ImageExternalTextureGL|
-  sk_sp<flutter::DlImage> CreateDlImage(
-      PaintContext& context,
-      const SkRect& bounds,
-      std::optional<HardwareBufferKey> id,
-      impeller::UniqueEGLImageKHR&& egl_image) override;
+  sk_sp<flutter::DlImage> CreateDlImage(PaintContext& context,
+                                        const SkRect& bounds,
+                                        std::optional<HardwareBufferKey> id,
+                                        impeller::UniqueEGLImageKHR&& egl_image,
+                                        const BufferInfo& info) override;
 
   const std::shared_ptr<impeller::ContextGLES> impeller_context_;
 

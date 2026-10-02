@@ -30,6 +30,7 @@ import io.flutter.embedding.engine.dart.PlatformMessageHandler;
 import io.flutter.embedding.engine.deferredcomponents.DeferredComponentManager;
 import io.flutter.embedding.engine.image.FlutterImageDecoder;
 import io.flutter.embedding.engine.mutatorsstack.FlutterMutatorsStack;
+import io.flutter.embedding.engine.renderer.FlutterSurfaceDynamicRangeListener;
 import io.flutter.embedding.engine.renderer.FlutterUiDisplayListener;
 import io.flutter.embedding.engine.renderer.FlutterUiResizeListener;
 import io.flutter.embedding.engine.renderer.SurfaceTextureWrapper;
@@ -154,37 +155,28 @@ public class FlutterJNI {
   private static native void nativePrefetchDefaultFontManager();
 
   /**
-   * Release an {@code AHardwareBuffer*}, close its acquire fence fd, and
-   * signal+close its release-ack fd.
+   * Release an {@code AHardwareBuffer*} and close its acquire fence fd.
    *
-   * <p>Used by {@link io.flutter.embedding.engine.renderer.FlutterRenderer
-   * .ImageTextureRegistryEntry} to free an {@code AHardwareBuffer} that was
-   * pushed via {@link io.flutter.view.TextureRegistry.ImageTextureEntry
-   * #pushHardwareBuffer(long, int, int)} and then superseded or released
-   * before the consumer could acquire it. Java cannot call the NDK
-   * {@code AHardwareBuffer_release} directly, so this bridges to the
-   * engine's native side.
+   * <p>Used by {@code FlutterRenderer.ImageTextureRegistryEntry} to free an {@code AHardwareBuffer}
+   * that was pushed via {@link
+   * io.flutter.view.TextureRegistry.ImageTextureEntry#pushHardwareBuffer(long, int)} and then
+   * superseded or released before the consumer could acquire it. Java cannot call the NDK {@code
+   * AHardwareBuffer_release} directly, so this bridges to the engine's native side.
    *
-   * <p>The public entry point is a plain (non-{@code native}) instance
-   * method; the actual JNI call lives in {@link
-   * #nativeReleaseHardwareBuffer}. This layering keeps the method
-   * stubbable by the mockito-core subclass mock maker, which otherwise
-   * has trouble intercepting {@code native} methods. Tests can therefore
-   * simply {@code verify(mockFlutterJNI).releaseHardwareBuffer(...)}.
+   * <p>The public entry point is a plain (non-{@code native}) instance method; the actual JNI call
+   * lives in {@link #nativeReleaseHardwareBuffer}. This layering keeps the method stubbable by the
+   * mockito-core subclass mock maker, which otherwise has trouble intercepting {@code native}
+   * methods. Tests can therefore simply {@code verify(mockFlutterJNI).releaseHardwareBuffer(...)}.
    *
-   * <p>Safe to call with {@code ahbPtr == 0}, {@code acquireFenceFd == -1},
-   * or {@code releaseAckFd == -1}; the native side treats each as a no-op
-   * independently. When {@code releaseAckFd} is non-negative the native
-   * side writes 8 bytes to it (matching the producer's {@code eventfd}
-   * semantics) before closing so any producer still polling wakes up.
+   * <p>Safe to call with {@code ahbPtr == 0} or {@code acquireFenceFd == -1}; the native side
+   * treats each as a no-op independently.
    */
-  public void releaseHardwareBuffer(long ahbPtr, int acquireFenceFd, int releaseAckFd) {
-    nativeReleaseHardwareBuffer(ahbPtr, acquireFenceFd, releaseAckFd);
+  public void releaseHardwareBuffer(long ahbPtr, int acquireFenceFd) {
+    nativeReleaseHardwareBuffer(ahbPtr, acquireFenceFd);
   }
 
   @Keep
-  private native void nativeReleaseHardwareBuffer(
-      long ahbPtr, int acquireFenceFd, int releaseAckFd);
+  private native void nativeReleaseHardwareBuffer(long ahbPtr, int acquireFenceFd);
 
   /**
    * Prefetch the default font manager provided by txt::GetDefaultFontManager() which is a
@@ -439,6 +431,14 @@ public class FlutterJNI {
   @NonNull
   private final Set<FlutterUiResizeListener> flutterUiResizeListeners = new CopyOnWriteArraySet<>();
 
+  @NonNull
+  private final Set<FlutterSurfaceDynamicRangeListener> surfaceDynamicRangeListeners =
+      new CopyOnWriteArraySet<>();
+
+  // Whether the surface Flutter renders into is extended-range; false until
+  // the engine reports a surface.
+  private boolean surfaceExtendedRange = false;
+
   @NonNull private final Looper mainLooper; // cached to avoid synchronization on repeat access.
 
   // ------ Start Native Attach/Detach Support ----
@@ -638,6 +638,53 @@ public class FlutterJNI {
 
     for (FlutterUiDisplayListener listener : flutterUiDisplayListeners) {
       listener.onFlutterUiDisplayed();
+    }
+  }
+
+  /**
+   * Adds a {@link FlutterSurfaceDynamicRangeListener}, which is told when the dynamic range of the
+   * surface Flutter renders into changes.
+   */
+  @UiThread
+  public void addSurfaceDynamicRangeListener(@NonNull FlutterSurfaceDynamicRangeListener listener) {
+    ensureRunningOnMainThread();
+    surfaceDynamicRangeListeners.add(listener);
+  }
+
+  /**
+   * Removes a {@link FlutterSurfaceDynamicRangeListener} that was added with {@link
+   * #addSurfaceDynamicRangeListener(FlutterSurfaceDynamicRangeListener)}.
+   */
+  @UiThread
+  public void removeSurfaceDynamicRangeListener(
+      @NonNull FlutterSurfaceDynamicRangeListener listener) {
+    ensureRunningOnMainThread();
+    surfaceDynamicRangeListeners.remove(listener);
+  }
+
+  /**
+   * Whether the surface Flutter renders into stores extended-range (F16) color. {@code false}
+   * before the first surface is created and after it is destroyed.
+   */
+  @UiThread
+  public boolean isSurfaceExtendedRange() {
+    ensureRunningOnMainThread();
+    return surfaceExtendedRange;
+  }
+
+  // Called by native each time the surface Flutter renders into is created or
+  // destroyed.
+  @SuppressWarnings("unused")
+  @VisibleForTesting
+  @UiThread
+  public void onSurfaceDynamicRangeChanged(boolean extendedRange) {
+    ensureRunningOnMainThread();
+    if (extendedRange == surfaceExtendedRange) {
+      return;
+    }
+    surfaceExtendedRange = extendedRange;
+    for (FlutterSurfaceDynamicRangeListener listener : surfaceDynamicRangeListeners) {
+      listener.onSurfaceDynamicRangeChanged(extendedRange);
     }
   }
 

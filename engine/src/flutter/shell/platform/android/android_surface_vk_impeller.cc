@@ -99,12 +99,20 @@ bool AndroidSurfaceVKImpeller::SetNativeWindow(
           surface_context_vk_->GetParent()),
       window->handle(), cb);
 
+  const bool extended_range = swapchain && swapchain->IsValid() &&
+                              swapchain->GetSurfaceFormat() ==
+                                  impeller::vk::Format::eR16G16B16A16Sfloat;
   if (surface_context_vk_->SetSwapchain(std::move(swapchain))) {
     native_window_ = std::move(window);
+    extended_range_ = extended_range;
     return true;
   }
 
   return false;
+}
+
+bool AndroidSurfaceVKImpeller::IsExtendedRange() const {
+  return native_window_ && extended_range_;
 }
 
 std::shared_ptr<impeller::Context>

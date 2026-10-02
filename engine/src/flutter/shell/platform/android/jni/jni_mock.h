@@ -50,6 +50,10 @@ class JNIMock final : public PlatformViewAndroidJNI {
               (override));
 
   MOCK_METHOD(void, FlutterViewOnFirstFrame, (), (override));
+  MOCK_METHOD(void,
+              FlutterViewOnSurfaceDynamicRangeChanged,
+              (bool extended_range),
+              (override));
 
   MOCK_METHOD(void, FlutterViewOnPreEngineRestart, (), (override));
 
@@ -81,6 +85,13 @@ class JNIMock final : public PlatformViewAndroidJNI {
   MOCK_METHOD(AcquiredHardwareBuffer,
               ImageProducerTextureEntryAcquireLatestHardwareBuffer,
               (JavaLocalRef image_texture_entry),
+              (override));
+
+  MOCK_METHOD(void,
+              ImageProducerTextureEntryOnHardwareBufferReleased,
+              (JavaLocalRef image_texture_entry,
+               AHardwareBuffer* buffer,
+               int release_fence_fd),
               (override));
 
   MOCK_METHOD(JavaLocalRef,
