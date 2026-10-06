@@ -115,6 +115,11 @@ void DartMessageHandler::OnHandleMessage(DartState* dart_state) {
   } else if (Dart_IsPausedOnExit()) {
     // We are paused on isolate exit. Only handle service messages until we are
     // requested to resume.
+    //
+    // A resume taken outside this dispatch can strand this state the same way
+    // as paused-on-start, but the paused-on-start fix does not carry over:
+    // setIsolatePauseMode can also clear should-pause-on-exit without a
+    // resume, so that flag does not prove one is pending.
     if (Dart_HasServiceMessages()) {
       bool resume = Dart_HandleServiceMessages();
       if (!resume) {
