@@ -324,3 +324,23 @@ void sendSemanticsUpdate() {
 
 @pragma('vm:external-name', 'SemanticsUpdate')
 external void _semanticsUpdate(SemanticsUpdate update);
+
+@pragma('vm:entry-point')
+void waitForServiceMessageThenSpin() {
+  waitForServiceMessage();
+  // Keep running Dart so the VM reaches an interrupt check and handles the
+  // service message that just arrived, before the message handler sees it.
+  var acc = 0;
+  for (var i = 0; i < 1000; i++) {
+    acc = accumulate(acc, i);
+  }
+  if (acc < 0) {
+    print(acc);
+  }
+}
+
+@pragma('vm:never-inline')
+int accumulate(int acc, int i) => acc + i;
+
+@pragma('vm:external-name', 'WaitForServiceMessage')
+external void waitForServiceMessage();

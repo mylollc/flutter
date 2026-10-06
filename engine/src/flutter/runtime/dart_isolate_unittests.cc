@@ -2,6 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+#include <chrono>
+#include <thread>
+
 #include "flutter/fml/mapping.h"
 #include "flutter/fml/synchronization/count_down_latch.h"
 #include "flutter/fml/synchronization/waitable_event.h"
@@ -15,7 +18,9 @@
 #include "flutter/testing/fixture_test.h"
 #include "flutter/testing/testing.h"
 #include "third_party/dart/runtime/include/dart_api.h"
+#include "third_party/dart/runtime/include/dart_tools_api.h"
 #include "third_party/tonic/converter/dart_converter.h"
+#include "third_party/tonic/scopes/dart_api_scope.h"
 #include "third_party/tonic/scopes/dart_isolate_scope.h"
 
 // CREATE_NATIVE_ENTRY is leaky by design
@@ -29,6 +34,11 @@ class DartIsolateTest : public FixtureTest {
   DartIsolateTest() {}
 
   void Wait() { latch_.Wait(); }
+
+  // Returns true if the timeout elapsed before the latch was signaled.
+  bool WaitTimesOut(fml::TimeDelta timeout) {
+    return latch_.WaitWithTimeout(timeout);
+  }
 
   void Signal() { latch_.Signal(); }
 
@@ -269,6 +279,108 @@ TEST_F(DartIsolateTest, CanRegisterNativeCallback) {
   ASSERT_TRUE(isolate);
   ASSERT_EQ(isolate->get()->GetPhase(), DartIsolate::Phase::Running);
   Wait();
+}
+
+TEST_F(
+    DartIsolateTest,
+    PausedOnStartIsolateResumesWhenTheResumeIsTakenOutsideItsMessageHandler) {
+#if (FLUTTER_RUNTIME_MODE != FLUTTER_RUNTIME_MODE_DEBUG) && \
+    (FLUTTER_RUNTIME_MODE != FLUTTER_RUNTIME_MODE_PROFILE)
+  GTEST_SKIP() << "Needs the VM service.";
+#endif
+  ASSERT_FALSE(DartVMRef::IsInstanceRunning());
+  AddNativeCallback(
+      "NotifyNative",
+      CREATE_NATIVE_ENTRY(([this](Dart_NativeArguments args) { Signal(); })));
+  AddNativeCallback(
+      "WaitForServiceMessage",
+      CREATE_NATIVE_ENTRY(([](Dart_NativeArguments args) {
+        // Return only once the debugger's resume has reached this isolate, so
+        // the VM takes it inside this Dart call rather than in the handler.
+        while (!Dart_HasServiceMessages()) {
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+      })));
+  fml::AutoResetWaitableEvent service_isolate_latch;
+  auto settings = CreateSettingsForFixture();
+  settings.start_paused = true;
+  settings.enable_vm_service = true;
+  settings.vm_service_port = 0;
+  settings.vm_service_host = "127.0.0.1";
+  settings.enable_service_port_fallback = true;
+  settings.service_isolate_create_callback = [&service_isolate_latch]() {
+    service_isolate_latch.Signal();
+  };
+  auto vm_ref = DartVMRef::Create(settings);
+  ASSERT_TRUE(vm_ref);
+  auto thread = CreateNewThread();
+  TaskRunners task_runners(GetCurrentTestName(),  //
+                           thread,                //
+                           thread,                //
+                           thread,                //
+                           thread                 //
+  );
+  auto isolate = RunDartCodeInIsolate(vm_ref, settings, task_runners,
+                                      "canRegisterNativeCallback", {},
+                                      GetDefaultKernelFilePath());
+  ASSERT_TRUE(isolate);
+  ASSERT_EQ(isolate->get()->GetPhase(), DartIsolate::Phase::Running);
+  service_isolate_latch.Wait();
+
+  // The entrypoint is queued, but the isolate pauses on its first message.
+  Dart_Isolate dart_isolate = isolate->get()->isolate();
+  bool paused = false;
+  for (int attempt = 0; attempt < 5000 && !paused; attempt++) {
+    fml::AutoResetWaitableEvent checked;
+    thread->PostTask([&]() {
+      tonic::DartIsolateScope scope(dart_isolate);
+      paused = Dart_IsPausedOnStart();
+      checked.Signal();
+    });
+    checked.Wait();
+    if (!paused) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+  }
+  ASSERT_TRUE(paused);
+
+  // A debugger resumes the isolate from another thread...
+  const char* raw_isolate_id = Dart_IsolateServiceId(dart_isolate);
+  const std::string isolate_id = raw_isolate_id;
+  free(const_cast<char*>(raw_isolate_id));
+  std::thread resumer([isolate_id]() {
+    std::string request =
+        "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"resume\","
+        "\"params\":{\"isolateId\":\"" +
+        isolate_id + "\"}}";
+    uint8_t* response = nullptr;
+    intptr_t response_length = 0;
+    char* error = nullptr;
+    const bool ok = Dart_InvokeVMServiceMethod(
+        reinterpret_cast<uint8_t*>(request.data()), request.size(), &response,
+        &response_length, &error);
+    EXPECT_TRUE(ok) << (error ? error : "");
+    free(response);
+    free(error);
+  });
+
+  // ...while the embedder is calling into Dart, so the VM takes the resume
+  // there and the handler never sees its service message.
+  fml::AutoResetWaitableEvent invoked;
+  thread->PostTask([&]() {
+    tonic::DartIsolateScope scope(dart_isolate);
+    tonic::DartApiScope api_scope;
+    Dart_Handle result =
+        Dart_Invoke(Dart_RootLibrary(),
+                    tonic::ToDart("waitForServiceMessageThenSpin"), 0, nullptr);
+    EXPECT_FALSE(Dart_IsError(result)) << Dart_GetError(result);
+    invoked.Signal();
+  });
+  invoked.Wait();
+  resumer.join();
+
+  // The handler must still resume the isolate and run the entrypoint.
+  ASSERT_FALSE(WaitTimesOut(fml::TimeDelta::FromSeconds(10)));
 }
 
 class DartSecondaryIsolateTest : public FixtureTest {
