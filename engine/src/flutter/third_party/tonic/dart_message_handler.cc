@@ -85,11 +85,23 @@ void DartMessageHandler::OnHandleMessage(DartState* dart_state) {
   if (Dart_IsPausedOnStart()) {
     // We are paused on isolate start. Only handle service messages until we are
     // requested to resume.
-    if (Dart_HasServiceMessages()) {
-      bool resume = Dart_HandleServiceMessages();
+    //
+    // The VM handles service messages whenever it runs Dart code, not only
+    // here: if the engine called into Dart (window metrics, a platform
+    // message) after this isolate paused, the debugger's resume request may
+    // already have been taken there. Its service message is then gone, so
+    // Dart_HasServiceMessages() is false and nothing would ever resume the
+    // isolate. A taken resume clears the isolate's should-pause-on-start flag,
+    // so treat that as the resume request (Dart_SetPausedOnStart(false)
+    // clears the pending request).
+    bool resume = !Dart_ShouldPauseOnStart();
+    if (!resume && Dart_HasServiceMessages()) {
+      resume = Dart_HandleServiceMessages();
       if (!resume) {
         return;
       }
+    }
+    if (resume) {
       Dart_SetPausedOnStart(false);
       // We've resumed, handle normal messages that are in the queue.
       result = Dart_HandleMessage();
