@@ -24,6 +24,7 @@ import 'package:flutter_tools/src/ios/xcode_debug.dart';
 import 'package:flutter_tools/src/ios/xcodeproj.dart';
 import 'package:flutter_tools/src/macos/xcode.dart';
 import 'package:flutter_tools/src/project.dart';
+import 'package:process/process.dart';
 import 'package:test/fake.dart';
 
 import '../../src/common.dart';
@@ -2747,6 +2748,28 @@ invalid JSON
     });
 
     group('list devices', () {
+      testWithoutContext('drains devicectl output before waiting for it to exit', () async {
+        // devicectl blocks in write() once its output exceeds the pipe buffer,
+        // so a tool that awaits the exit code before reading stdout and stderr
+        // never sees it exit. This process exits only once both pipes are read.
+        final processManager = _ExitsOnceOutputIsReadProcessManager();
+        final deviceControl = IOSCoreDeviceControl(
+          logger: logger,
+          processManager: processManager,
+          xcode: xcode,
+          fileSystem: fileSystem,
+        );
+
+        await expectLater(
+          deviceControl.getCoreDevices().timeout(const Duration(seconds: 30)),
+          completion(isEmpty),
+        );
+        expect(
+          processManager.command,
+          containsAllInOrder(<String>['devicectl', 'list', 'devices']),
+        );
+      });
+
       testWithoutContext('Handles FileSystemException deleting temp directory', () async {
         final Directory tempDir = fileSystem.systemTempDirectory.childDirectory(
           'core_devices.rand0',
@@ -4073,4 +4096,58 @@ class FakeShutdownHooks extends Fake implements ShutdownHooks {
   Future<void> runShutdownHooks(Logger logger) async {
     _isShuttingDown = true;
   }
+}
+
+/// Starts a process that exits only once both of its output pipes have a
+/// listener, the way a real process stays blocked in write() when its output
+/// exceeds the pipe buffer and nothing reads it.
+class _ExitsOnceOutputIsReadProcessManager extends Fake implements ProcessManager {
+  List<String>? command;
+
+  @override
+  Future<io.Process> start(
+    List<Object> command, {
+    String? workingDirectory,
+    Map<String, String>? environment,
+    bool includeParentEnvironment = true,
+    bool runInShell = false,
+    io.ProcessStartMode mode = io.ProcessStartMode.normal,
+  }) async {
+    this.command = command.map((Object part) => part.toString()).toList();
+    return _ExitsOnceOutputIsReadProcess();
+  }
+}
+
+class _ExitsOnceOutputIsReadProcess extends Fake implements io.Process {
+  _ExitsOnceOutputIsReadProcess() {
+    _stdout.onListen = _exitOnceBothPipesAreRead;
+    _stderr.onListen = _exitOnceBothPipesAreRead;
+  }
+
+  final StreamController<List<int>> _stdout = StreamController<List<int>>();
+  final StreamController<List<int>> _stderr = StreamController<List<int>>();
+  final Completer<int> _exitCode = Completer<int>();
+
+  void _exitOnceBothPipesAreRead() {
+    if (_stdout.hasListener && _stderr.hasListener && !_exitCode.isCompleted) {
+      _stdout.close();
+      _stderr.close();
+      _exitCode.complete(0);
+    }
+  }
+
+  @override
+  Stream<List<int>> get stdout => _stdout.stream;
+
+  @override
+  Stream<List<int>> get stderr => _stderr.stream;
+
+  @override
+  Future<int> get exitCode => _exitCode.future;
+
+  @override
+  int get pid => 1234;
+
+  @override
+  bool kill([io.ProcessSignal signal = io.ProcessSignal.sigterm]) => true;
 }

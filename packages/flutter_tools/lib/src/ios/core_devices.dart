@@ -377,6 +377,13 @@ class IOSCoreDeviceControl {
     try {
       process = await _processUtils.start(command);
 
+      // Start draining stdout and stderr before waiting for the process to
+      // exit. If nothing reads the pipes, devicectl blocks on write() once its
+      // output exceeds the pipe buffer and never exits, so neither the exit
+      // code below nor devicectl's own --timeout can fire.
+      final Future<String> stdoutFuture = utf8.decodeStream(process.stdout);
+      final Future<String> stderrFuture = utf8.decodeStream(process.stderr);
+
       final Future<void> cancelFuture = cancelCompleter?.future ?? Completer<void>().future;
       final Future<dynamic> firstCompleted = Future.any<dynamic>(<Future<dynamic>>[
         process.exitCode,
@@ -390,8 +397,8 @@ class IOSCoreDeviceControl {
       }
 
       final int exitCode = await process.exitCode;
-      final String stdout = await utf8.decodeStream(process.stdout);
-      final String stderr = await utf8.decodeStream(process.stderr);
+      final String stdout = await stdoutFuture;
+      final String stderr = await stderrFuture;
 
       var isToolPossiblyShutdown = false;
       if (_fileSystem is ErrorHandlingFileSystem) {
