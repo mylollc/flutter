@@ -117,11 +117,34 @@ bool SurfaceTransaction::SetContents(const SurfaceControl* control,
   const bool ds_available =
       GetProcTable().ASurfaceTransaction_setBufferDataSpace.IsAvailable();
 
+  // OLYM-1122: the dataspace is CONTENT-CONDITIONAL, keyed off the same
+  // app-declared ratio as the brightness call below. Advertising
+  // ADATASPACE_SCRGB is not free: Samsung One UI (verified S23, One UI 8.0)
+  // treats the extended-range LABEL — not the declared ratio — as the signal
+  // to put the panel into HDR mode, which reserves headroom by dimming SDR
+  // white. With an unconditional SCRGB label the whole Flutter surface renders
+  // dim while showing pure SDR content, and the OS status/nav bars (separate
+  // sRGB layers) stay bright next to it. Pixel clamps the same declaration
+  // benignly, which is why only Samsung users saw it.
+  //
+  // Evidence that the LABEL is the operative signal, not the ratio: an
+  // earlier iteration conditioned only ASurfaceTransaction_setExtendedRangeBrightness
+  // and left this call at ADATASPACE_SCRGB — it still dimmed. Conditioning
+  // the dataspace as well is what removed the dim.
+  //
+  // A ratio of 1.0 (the default, until the embedder calls
+  // FlutterRenderer.setHdrHeadroom) means "no HDR content on screen", so the
+  // honest label is plain sRGB. Anything above 1.0 means genuine HDR content
+  // is live and the extended-range label is warranted — at which point the
+  // panel entering HDR mode is correct behaviour, not the bug.
+  const float erb_ratio = GetExtendedRangeBrightnessRatio();
+  const bool hdr_live = erb_ratio > 1.0f;
+
   if (is_f16 && ds_available) {
     GetProcTable().ASurfaceTransaction_setBufferDataSpace(
-        transaction_.get().tx,  //
-        control->GetHandle(),   //
-        ADATASPACE_SCRGB        // gamma-encoded ExtendedSRGB
+        transaction_.get().tx,                          //
+        control->GetHandle(),                           //
+        hdr_live ? ADATASPACE_SCRGB : ADATASPACE_SRGB   // content-conditional
     );
   }
 
@@ -137,7 +160,6 @@ bool SurfaceTransaction::SetContents(const SurfaceControl* control,
   const bool erb_available =
       GetProcTable()
           .ASurfaceTransaction_setExtendedRangeBrightness.IsAvailable();
-  const float erb_ratio = GetExtendedRangeBrightnessRatio();
   if (is_f16 && erb_available) {
     GetProcTable().ASurfaceTransaction_setExtendedRangeBrightness(
         transaction_.get().tx,  //
@@ -150,9 +172,11 @@ bool SurfaceTransaction::SetContents(const SurfaceControl* control,
   if (!logged_once) {
     FML_LOG(INFO) << "SetContents: format=" << (is_f16 ? "F16" : "RGBA8")
                   << ", setBufferDataSpace available=" << ds_available
-                  << ", dataspace=" << (is_f16 ? "SCRGB" : "default")
+                  << ", dataspace="
+                  << (is_f16 ? (hdr_live ? "SCRGB" : "SRGB") : "default")
                   << ", setExtendedRangeBrightness available=" << erb_available
-                  << ", extendedRange=" << erb_ratio;
+                  << ", extendedRange=" << erb_ratio
+                  << " (dataspace is content-conditional, OLYM-1122)";
     logged_once = true;
   }
 
