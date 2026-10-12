@@ -41,12 +41,14 @@ float GetExtendedRangeBrightnessRatio() {
 }
 
 SurfaceTransaction::SurfaceTransaction()
-    : transaction_(
-          WrappedSurfaceTransaction{GetProcTable().ASurfaceTransaction_create(),
-                                    /*owned=*/true}) {}
+    : transaction_(WrappedSurfaceTransaction{
+          GetProcTable().ASurfaceTransaction_create(), /*owned=*/true,
+          /*publish_callback=*/nullptr}) {}
 
-SurfaceTransaction::SurfaceTransaction(ASurfaceTransaction* transaction)
-    : transaction_(WrappedSurfaceTransaction{transaction, /*owned=*/false}) {}
+SurfaceTransaction::SurfaceTransaction(ASurfaceTransaction* transaction,
+                                       std::function<void()> publish_callback)
+    : transaction_(WrappedSurfaceTransaction{transaction, /*owned=*/false,
+                                             std::move(publish_callback)}) {}
 
 SurfaceTransaction::~SurfaceTransaction() = default;
 
@@ -83,7 +85,13 @@ bool SurfaceTransaction::Apply(OnCompleteCallback callback) {
   // the Java PlatformViewController and not as a part of the engine render
   // loop.
   if (!transaction_.get().owned) {
+    // All native writes into the transaction are done at this point. Hand it
+    // back to Java, which owns applying it.
+    std::function<void()> publish_cb = transaction_.get().publish_callback;
     transaction_.reset();
+    if (publish_cb) {
+      publish_cb();
+    }
     return true;
   }
 
