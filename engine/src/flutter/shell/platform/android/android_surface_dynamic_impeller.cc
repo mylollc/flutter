@@ -113,6 +113,11 @@ AndroidSurfaceDynamicImpeller::CreateSnapshotSurface() {
   return nullptr;
 }
 
+bool AndroidSurfaceDynamicImpeller::IsExtendedRange() const {
+  // The OpenGL ES surface is always SDR.
+  return vulkan_surface_ && vulkan_surface_->IsExtendedRange();
+}
+
 std::shared_ptr<impeller::Context>
 AndroidSurfaceDynamicImpeller::GetImpellerContext() {
   return android_context_->GetImpellerContext();

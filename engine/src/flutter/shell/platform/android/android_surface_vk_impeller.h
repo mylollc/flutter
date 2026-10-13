@@ -50,10 +50,16 @@ class AndroidSurfaceVKImpeller : public AndroidSurface {
       fml::RefPtr<AndroidNativeWindow> window,
       const std::shared_ptr<PlatformViewAndroidJNI>& jni_facade) override;
 
+  // |AndroidSurface|
+  bool IsExtendedRange() const override;
+
  private:
   std::shared_ptr<impeller::SurfaceContextVK> surface_context_vk_;
   fml::RefPtr<AndroidNativeWindow> native_window_;
   bool is_valid_ = false;
+  // Whether the current swapchain is F16 (falls back to RGBA8 on devices
+  // without F16 swapchain support).
+  bool extended_range_ = false;
 
   FML_DISALLOW_COPY_AND_ASSIGN(AndroidSurfaceVKImpeller);
 };

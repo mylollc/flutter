@@ -67,7 +67,14 @@ public class PlatformViewsController2 implements PlatformViewsAccessibilityDeleg
   private final SparseArray<FlutterMutatorView> platformViewParent;
   private final MotionEventTracker motionEventTracker;
 
+  // The raster thread appends to pendingTransactions (createTransaction, one per presented frame)
+  // while the platform thread drains it (swapTransactions, applyTransactions), so every access to
+  // it holds pendingTransactionsLock. Unguarded, an append that races a drain leaves a null slot
+  // in the list, merge(null) throws on the platform thread, and the engine's
+  // FML_CHECK(CheckException) after the JNI call aborts the process. activeTransactions is
+  // platform-thread only.
   private final ArrayList<SurfaceControl.Transaction> pendingTransactions;
+  private final Object pendingTransactionsLock = new Object();
   private final ArrayList<SurfaceControl.Transaction> activeTransactions;
   private Surface overlayerSurface = null;
   private SurfaceControl overlaySurfaceControl = null;
@@ -546,32 +553,38 @@ public class PlatformViewsController2 implements PlatformViewsAccessibilityDeleg
     flutterView.getRootSurfaceControl().applyTransactionOnDraw(tx);
   }
 
-  // NOT called from UI thread.
+  // Called on the platform thread (a task posted by the external view embedder).
   public synchronized void swapTransactions() {
     activeTransactions.clear();
-    for (int i = 0; i < pendingTransactions.size(); i++) {
-      activeTransactions.add(pendingTransactions.get(i));
+    synchronized (pendingTransactionsLock) {
+      activeTransactions.addAll(pendingTransactions);
+      pendingTransactions.clear();
     }
-    pendingTransactions.clear();
   }
 
-  // NOT called from UI thread.
+  // Called on the raster thread (AHB swapchain present).
   @RequiresApi(API_LEVELS.API_34)
   public SurfaceControl.Transaction createTransaction() {
     SurfaceControl.Transaction tx = new SurfaceControl.Transaction();
-    pendingTransactions.add(tx);
+    synchronized (pendingTransactionsLock) {
+      pendingTransactions.add(tx);
+    }
     return tx;
   }
 
-  // NOT called from UI thread.
+  // Called on the platform thread, after every frame that has no platform view.
   @RequiresApi(API_LEVELS.API_34)
   public void applyTransactions() {
+    final ArrayList<SurfaceControl.Transaction> drained;
+    synchronized (pendingTransactionsLock) {
+      drained = new ArrayList<>(pendingTransactions);
+      pendingTransactions.clear();
+    }
     SurfaceControl.Transaction tx = new SurfaceControl.Transaction();
-    for (int i = 0; i < pendingTransactions.size(); i++) {
-      tx = tx.merge(pendingTransactions.get(i));
+    for (int i = 0; i < drained.size(); i++) {
+      tx = tx.merge(drained.get(i));
     }
     tx.apply();
-    pendingTransactions.clear();
   }
 
   @RequiresApi(API_LEVELS.API_34)

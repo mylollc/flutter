@@ -58,6 +58,9 @@ class AndroidSurfaceDynamicImpeller : public AndroidSurface {
       const std::shared_ptr<PlatformViewAndroidJNI>& jni_facade) override;
 
   // |AndroidSurface|
+  bool IsExtendedRange() const override;
+
+  // |AndroidSurface|
   std::unique_ptr<Surface> CreateSnapshotSurface() override;
 
   // |AndroidSurface|

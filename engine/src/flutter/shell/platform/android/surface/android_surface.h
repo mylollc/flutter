@@ -48,6 +48,11 @@ class AndroidSurface {
 
   virtual void SetupImpellerSurface();
 
+  /// Whether the onscreen surface stores extended-range (F16) color, so
+  /// content brighter than SDR white reaches the display. Read on the raster
+  /// thread once the surface is created. Defaults to false: SDR.
+  virtual bool IsExtendedRange() const;
+
  protected:
   AndroidSurface();
 };

@@ -271,12 +271,15 @@ bool RuntimeEffectContents::Render(const ContentContext& renderer,
           break;
         }
         case kFloat: {
+          // Metal binds a loose float uniform as its own [[buffer(N)]], the
+          // stock binding. Only this fork's impellerc wraps a Metal runtime
+          // stage's loose uniforms into one UBO (kStruct, below); shaders
+          // compiled by the stock SDK impellerc still reflect them as kFloat
+          // on Metal, so Metal must accept both. Vulkan always wraps.
           FML_DCHECK(renderer.GetContext()->GetBackendType() !=
-                         Context::BackendType::kVulkan &&
-                     renderer.GetContext()->GetBackendType() !=
-                         Context::BackendType::kMetal)
+                     Context::BackendType::kVulkan)
               << "Uniform " << uniform.name
-              << " had unexpected type kFloat for Vulkan/Metal backend.";
+              << " had unexpected type kFloat for Vulkan backend.";
 
           size_t alignment =
               std::max(uniform.bit_width / 8,
