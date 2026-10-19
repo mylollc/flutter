@@ -124,6 +124,25 @@ void fl_view_set_hdr_enabled(FlView* view, gboolean enable);
  */
 double fl_view_get_display_headroom(FlView* view);
 
+/**
+ * fl_view_get_hdr_active:
+ * @view: an #FlView.
+ *
+ * Gets whether the view presents through the HDR compositor, i.e. whether
+ * fl_view_set_hdr_enabled was honored. When %TRUE, Flutter composites into
+ * linear half-float (scRGB) backing stores, so a fragment shader's output is
+ * read as LINEAR light; when %FALSE (X11, no color management, HDR never
+ * requested, not yet realized) it lands in the standard 8-bit surface, read
+ * as gamma-encoded sRGB. Fixed once the view is realized, before the engine
+ * starts, so the answer is final by the time Dart code runs.
+ *
+ * This is not the same question as fl_view_get_display_headroom: the HDR
+ * compositor can be active on an SDR output, where the headroom is 1.0.
+ *
+ * Returns: %TRUE if the HDR compositor is presenting this view.
+ */
+gboolean fl_view_get_hdr_active(FlView* view);
+
 G_END_DECLS
 
 #endif  // FLUTTER_SHELL_PLATFORM_LINUX_PUBLIC_FLUTTER_LINUX_FL_VIEW_H_

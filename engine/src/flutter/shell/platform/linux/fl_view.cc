@@ -876,6 +876,11 @@ G_MODULE_EXPORT double fl_view_get_display_headroom(FlView* self) {
   return 1.0;  // SDR presentation path (X11 / no color management)
 }
 
+G_MODULE_EXPORT gboolean fl_view_get_hdr_active(FlView* self) {
+  g_return_val_if_fail(FL_IS_VIEW(self), FALSE);
+  return self->compositor != nullptr && FL_IS_COMPOSITOR_HDR(self->compositor);
+}
+
 FlViewAccessible* fl_view_get_accessible(FlView* self) {
   g_return_val_if_fail(FL_IS_VIEW(self), nullptr);
   return self->view_accessible;
