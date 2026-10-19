@@ -53,6 +53,19 @@ TEST(FlViewTest, SetHdrEnabledFallsBackWithoutColorManagement) {
   EXPECT_EQ(fl_view_get_display_headroom(view), 1.0);
 }
 
+// Off the HDR presentation path the view reports the standard compositor,
+// before realize and when HDR was requested but can't be provided. App code
+// reads this to decide whether its shaders write linear or encoded output.
+TEST(FlViewTest, HdrActiveFalseWithoutHdrCompositor) {
+  flutter::testing::fl_ensure_gtk_init();
+  g_autoptr(FlDartProject) project = fl_dart_project_new();
+  FlView* view = fl_view_new(project);
+
+  EXPECT_FALSE(fl_view_get_hdr_active(view));
+  fl_view_set_hdr_enabled(view, TRUE);
+  EXPECT_FALSE(fl_view_get_hdr_active(view));
+}
+
 // The headroom-change notification consumers discover at runtime with
 // g_signal_lookup (they build against stock headers, where the signal
 // doesn't exist) is registered on the view type.
