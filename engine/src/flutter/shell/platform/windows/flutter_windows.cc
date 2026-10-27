@@ -270,6 +270,11 @@ IDXGIAdapter* FlutterDesktopViewGetGraphicsAdapter(FlutterDesktopViewRef view) {
   return nullptr;
 }
 
+bool FlutterDesktopViewIsHdrSurface(FlutterDesktopViewRef view) {
+  auto egl_manager = ViewFromHandle(view)->GetEngine()->egl_manager();
+  return egl_manager && egl_manager->is_rgba16float();
+}
+
 bool FlutterDesktopEngineProcessExternalWindowMessage(
     FlutterDesktopEngineRef engine,
     HWND hwnd,
