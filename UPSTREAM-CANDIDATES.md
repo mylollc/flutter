@@ -215,6 +215,11 @@ build time.
 
 - The HCPP transaction fixes on this branch are cherry-picks of upstream
   #181009, #190612, #192606 and #192969; nothing to file.
+- `Fixing corrupted window size OnEmptyFrameGenerated due to transpsed
+  width/height (#187954)` is a cherry-pick of upstream 6ca03c62df (2026-10-27).
+  Without it a resize answered by an empty frame recreated the Windows render
+  surface with width and height swapped, so the UI drew 1:1 in the bottom-left
+  corner of a white window until the next real resize.
 - `Fix Xcode 27 lipo verification failure for Darwin frameworks (#188625)` and
   the two AHB swapchain commits by Jason Simmons are upstream commits.
 - The F16/EDR/HDR compositing stack itself (macOS, iOS, Android, Windows,
