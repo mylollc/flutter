@@ -99,6 +99,32 @@
 
 #pragma mark - NSAccessibilityProtocol
 
+// The field's name is the semantics node's label (AXNodeData's name). Without
+// this override the NSTextField has no title or description of its own, so
+// VoiceOver announced every Flutter text field as "edit text, blank".
+- (NSString*)accessibilityLabel {
+  if (!_node) {
+    return [super accessibilityLabel];
+  }
+  const std::string& name = _node->GetStringAttribute(ax::mojom::StringAttribute::kName);
+  if (name.empty()) {
+    return [super accessibilityLabel];
+  }
+  return [NSString stringWithUTF8String:name.c_str()];
+}
+
+// While the field is being edited, its string value is kept current by
+// -updateString:withSelection:. Before that (and after editing moves on), the
+// NSTextField's string value is empty or stale, so report the semantics node's
+// value instead: a field that shows text must not read as blank.
+- (id)accessibilityValue {
+  if (!_node || _plugin.client == self) {
+    return [super accessibilityValue];
+  }
+  const std::string& value = _node->GetStringAttribute(ax::mojom::StringAttribute::kValue);
+  return [NSString stringWithUTF8String:value.c_str()];
+}
+
 - (void)setAccessibilityFocused:(BOOL)isFocused {
   if (!_node) {
     return;

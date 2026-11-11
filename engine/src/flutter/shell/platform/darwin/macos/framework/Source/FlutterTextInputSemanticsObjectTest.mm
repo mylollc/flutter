@@ -67,4 +67,43 @@ TEST(FlutterTextInputSemanticsObjectTest, DoesInitialize) {
   [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
 }
 
+TEST(FlutterTextInputSemanticsObjectTest, ReportsLabelAndValueToAccessibility) {
+  FlutterEngine* engine = CreateTestEngine();
+  {
+    FlutterViewController* viewController = [[FlutterViewController alloc] initWithEngine:engine
+                                                                                  nibName:nil
+                                                                                   bundle:nil];
+    [viewController loadView];
+    NSWindow* window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 800, 600)
+                                                   styleMask:NSBorderlessWindowMask
+                                                     backing:NSBackingStoreBuffered
+                                                       defer:NO];
+    window.contentView = viewController.view;
+
+    engine.semanticsEnabled = YES;
+
+    auto bridge = viewController.accessibilityBridge.lock();
+    FlutterPlatformNodeDelegateMac delegate(bridge, viewController);
+    ui::AXTree tree;
+    ui::AXNode ax_node(&tree, nullptr, 0, 0);
+    ui::AXNodeData node_data;
+    node_data.role = ax::mojom::Role::kTextField;
+    node_data.SetName("Title");
+    node_data.SetValue("Opera House");
+    ax_node.SetData(node_data);
+    delegate.Init(viewController.accessibilityBridge, &ax_node);
+    FlutterTextPlatformNode text_platform_node(&delegate, viewController);
+    FlutterTextField* textField = text_platform_node.GetNativeViewAccessible();
+
+    // The semantics label is the field's name, and its value is readable
+    // before editing starts (VoiceOver used to read "edit text, blank").
+    EXPECT_TRUE([[textField accessibilityLabel] isEqualToString:@"Title"]);
+    EXPECT_TRUE([[textField accessibilityValue] isEqualToString:@"Opera House"]);
+  }
+
+  [engine shutDownEngine];
+  engine = nil;
+  [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
+}
+
 }  // namespace flutter::testing
