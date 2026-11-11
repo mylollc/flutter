@@ -199,6 +199,26 @@ replacement and the module already imports `shlex`.
 **PR needs:** split the one-line hunk out of the EDR commit. Trivial,
 test-exempt.
 
+## 12. macOS: VoiceOver reads every text field with no name ("edit text, blank")
+
+**Commit:** `[macOS] Give the accessibility text field its semantics label and value`
+**File:** `FlutterTextInputSemanticsObject.mm`
+**Upstream:** unfixed; `FlutterTextField` on master (last changed by #164014,
+2025-03) has no `accessibilityLabel` or `accessibilityValue` override.
+
+**Issue text.** On macOS a text field's semantics node is shown to
+accessibility clients as a hidden `FlutterTextField` (an `NSTextField`). It
+never takes the node's label, and its string value is set only once editing
+starts through VoiceOver (`startEditing`). So the macOS accessibility tree has
+an `AXTextField` with no `AXDescription`, `AXTitle` or `AXValue`, although
+Flutter's semantics tree has `label: "Title"` and a value, and VoiceOver
+announces "edit text, blank". Fix: `accessibilityLabel` returns the node's
+name (the semantics label) and, while the field is not being edited,
+`accessibilityValue` returns the node's value.
+
+**PR needs:** the commit as is. It carries a test,
+`FlutterTextInputSemanticsObjectTest.ReportsLabelAndValueToAccessibility`.
+
 ## Formatting status
 
 Checked 2026-10-13 with the engine's own tools: clang-format (buildtools),
