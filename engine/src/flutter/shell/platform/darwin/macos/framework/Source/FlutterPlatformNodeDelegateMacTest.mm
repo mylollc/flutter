@@ -8,6 +8,7 @@
 #import "flutter/shell/platform/darwin/macos/framework/Source/FlutterDartProject_Internal.h"
 #import "flutter/shell/platform/darwin/macos/framework/Source/FlutterEngine_Internal.h"
 #import "flutter/shell/platform/darwin/macos/framework/Source/FlutterPlatformNodeDelegateMac.h"
+#import "flutter/shell/platform/darwin/macos/framework/Source/FlutterTextInputPlugin.h"
 #import "flutter/shell/platform/darwin/macos/framework/Source/FlutterTextInputSemanticsObject.h"
 #import "flutter/shell/platform/darwin/macos/framework/Source/FlutterViewControllerTestUtils.h"
 #import "flutter/shell/platform/darwin/macos/framework/Source/FlutterViewController_Internal.h"
@@ -310,6 +311,84 @@ TEST(FlutterPlatformNodeDelegateMac, TextFieldUsesFlutterTextField) {
 
   [native_text_field startEditing];
   EXPECT_EQ([native_text_field.stringValue isEqualToString:@"textfield"], YES);
+}
+
+// Keyboard focus reaching a text field (a click, Tab) makes the field the
+// field editor's client, as VoiceOver focusing it does. Before, the field
+// editor stayed first responder on its own, outside the field, and was the
+// focused accessibility element: an unnamed text area whose parent was the
+// window, so VoiceOver's next move left the window's content.
+TEST(FlutterPlatformNodeDelegateMac, KeyboardFocusOnTextFieldStartsEditing) {
+  FlutterViewController* viewController = CreateTestViewController();
+  FlutterEngine* engine = viewController.engine;
+  [viewController loadView];
+
+  // Creates a NSWindow so that the native text field can become first responder.
+  NSWindow* window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 800, 600)
+                                                 styleMask:NSBorderlessWindowMask
+                                                   backing:NSBackingStoreBuffered
+                                                     defer:NO];
+  window.contentView = viewController.view;
+  engine.semanticsEnabled = YES;
+
+  auto bridge = viewController.accessibilityBridge.lock();
+  FlutterSemanticsNode2 root;
+  FlutterSemanticsFlags flags = FlutterSemanticsFlags{0};
+  FlutterSemanticsFlags child_flags = FlutterSemanticsFlags{
+      .is_focused = FlutterTristate::kFlutterTristateTrue, .is_text_field = true};
+  root.id = 0;
+  root.flags2 = &flags;
+  // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
+  root.actions = static_cast<FlutterSemanticsAction>(0);
+  root.label = "root";
+  root.hint = "";
+  root.value = "";
+  root.increased_value = "";
+  root.decreased_value = "";
+  root.tooltip = "";
+  root.child_count = 1;
+  int32_t children[] = {1};
+  root.children_in_traversal_order = children;
+  root.custom_accessibility_actions_count = 0;
+  root.identifier = "";
+  root.rect = {0, 0, 100, 100};  // LTRB
+  root.transform = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+  bridge->AddFlutterSemanticsNodeUpdate(root);
+
+  FlutterSemanticsNode2 child1;
+  child1.id = 1;
+  child1.flags2 = &child_flags;
+  // NOLINTNEXTLINE(clang-analyzer-optin.core.EnumCastOutOfRange)
+  child1.actions = static_cast<FlutterSemanticsAction>(0);
+  child1.label = "Search";
+  child1.hint = "";
+  child1.value = "";
+  child1.increased_value = "";
+  child1.decreased_value = "";
+  child1.tooltip = "";
+  child1.text_selection_base = -1;
+  child1.text_selection_extent = -1;
+  child1.child_count = 0;
+  child1.custom_accessibility_actions_count = 0;
+  child1.identifier = "";
+  child1.rect = {0, 0, 50, 50};  // LTRB
+  child1.transform = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+  bridge->AddFlutterSemanticsNodeUpdate(child1);
+
+  bridge->CommitUpdates();
+
+  auto root_platform_node_delegate = bridge->GetFlutterPlatformNodeDelegateFromID(0).lock();
+  auto child_platform_node_delegate = bridge->GetFlutterPlatformNodeDelegateFromID(1).lock();
+  id native_accessibility = child_platform_node_delegate->GetNativeViewAccessible();
+  ASSERT_TRUE([native_accessibility isKindOfClass:[FlutterTextField class]]);
+  FlutterTextField* native_text_field = (FlutterTextField*)native_accessibility;
+
+  EXPECT_EQ(engine.textInputPlugin.client, native_text_field);
+  // The field sits in the tree: its parent is the root's element, which
+  // lists it among its children.
+  EXPECT_EQ([native_text_field accessibilityParent],
+            root_platform_node_delegate -> GetNativeViewAccessible());
+  [engine shutDownEngine];
 }
 
 TEST(FlutterPlatformNodeDelegateMac, ChangingFlagsUpdatesNativeViewAccessible) {

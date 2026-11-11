@@ -219,6 +219,37 @@ name (the semantics label) and, while the field is not being edited,
 **PR needs:** the commit as is. It carries a test,
 `FlutterTextInputSemanticsObjectTest.ReportsLabelAndValueToAccessibility`.
 
+## 13. macOS: VoiceOver leaves the window content from any text field
+
+**Commit:** `[macOS] Keep a focused text field inside the accessibility tree`
+**Files:** `FlutterTextInputSemanticsObject.mm`, `AccessibilityBridgeMac.mm`
+**Upstream:** unfixed; on master `FlutterTextField` has no
+`accessibilityParent` override and `AccessibilityBridgeMac` ignores
+`FOCUS_CHANGED`.
+
+**Issue text.** With VoiceOver on, VO-Right from any text field lands on the
+Flutter view's group, outside the app's content, and further presses stay
+there. Two causes:
+
+1. `FlutterTextField` (an `NSTextField`) is listed among its semantics
+   parent's children, but its superview (the view controller's view) is not an
+   accessibility element, so it reports the window as its `AXParent`. The
+   window does not list it, so VoiceOver has no next element to move to.
+2. When keyboard focus reaches a text field without VoiceOver (a click, Tab),
+   nothing makes the field the field editor's client:
+   `-[FlutterTextField startEditing]` runs only after VoiceOver focuses the
+   field. The field editor (`FlutterTextInputPlugin`, an `NSTextView`) then is
+   first responder on its own in the view controller's view, and is the focused
+   accessibility element: an unnamed `AXTextArea` whose parent is the window.
+
+Fix: `FlutterTextField` returns its semantics parent as
+`accessibilityParent`, and `AccessibilityBridgeMac` starts editing a text
+field when the tree's focus (keyboard focus) moves onto it, as it already does
+for VoiceOver's focus.
+
+**PR needs:** the commit as is. It carries a test,
+`FlutterTextInputSemanticsObjectTest.ReportsItsSemanticsParentToAccessibility`.
+
 ## Formatting status
 
 Checked 2026-10-13 with the engine's own tools: clang-format (buildtools),

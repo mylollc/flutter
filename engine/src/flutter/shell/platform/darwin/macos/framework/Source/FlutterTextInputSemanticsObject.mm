@@ -99,6 +99,24 @@
 
 #pragma mark - NSAccessibilityProtocol
 
+// The field's place in the accessibility tree is its semantics node's: the
+// node's parent lists this field among its children, so the field reports that
+// parent back. Without this override NSView reports the nearest accessible
+// superview, and this field's superview (the view controller's view) is not an
+// accessibility element, so the parent came out as the window. The window does
+// not list the field among its children, so VoiceOver, moving on from the
+// field, landed on the Flutter view's group and stayed there.
+- (id)accessibilityParent {
+  if (!_node) {
+    return [super accessibilityParent];
+  }
+  gfx::NativeViewAccessible parent = _node->GetParent();
+  if (!parent) {
+    return [super accessibilityParent];
+  }
+  return parent;
+}
+
 // The field's name is the semantics node's label (AXNodeData's name). Without
 // this override the NSTextField has no title or description of its own, so
 // VoiceOver announced every Flutter text field as "edit text, blank".

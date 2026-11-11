@@ -106,4 +106,44 @@ TEST(FlutterTextInputSemanticsObjectTest, ReportsLabelAndValueToAccessibility) {
   [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
 }
 
+TEST(FlutterTextInputSemanticsObjectTest, ReportsItsSemanticsParentToAccessibility) {
+  FlutterEngine* engine = CreateTestEngine();
+  {
+    FlutterViewController* viewController = [[FlutterViewController alloc] initWithEngine:engine
+                                                                                  nibName:nil
+                                                                                   bundle:nil];
+    [viewController loadView];
+    NSWindow* window = [[NSWindow alloc] initWithContentRect:NSMakeRect(0, 0, 800, 600)
+                                                   styleMask:NSBorderlessWindowMask
+                                                     backing:NSBackingStoreBuffered
+                                                       defer:NO];
+    window.contentView = viewController.view;
+
+    engine.semanticsEnabled = YES;
+
+    auto bridge = viewController.accessibilityBridge.lock();
+    FlutterPlatformNodeDelegateMac delegate(bridge, viewController);
+    ui::AXTree tree;
+    ui::AXNode ax_node(&tree, nullptr, 0, 0);
+    ui::AXNodeData node_data;
+    node_data.role = ax::mojom::Role::kTextField;
+    node_data.SetName("Search");
+    ax_node.SetData(node_data);
+    delegate.Init(viewController.accessibilityBridge, &ax_node);
+    FlutterTextPlatformNode text_platform_node(&delegate, viewController);
+    FlutterTextField* textField = text_platform_node.GetNativeViewAccessible();
+
+    // The field's accessibility parent is its semantics parent (for a root
+    // node, the Flutter view), not the window: the window does not list the
+    // field among its children, so VoiceOver's next move left the content.
+    EXPECT_EQ([textField accessibilityParent], delegate.GetParent());
+    EXPECT_EQ([textField accessibilityParent], viewController.flutterView);
+    EXPECT_NE([textField accessibilityParent], window);
+  }
+
+  [engine shutDownEngine];
+  engine = nil;
+  [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
+}
+
 }  // namespace flutter::testing

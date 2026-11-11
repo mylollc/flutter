@@ -260,6 +260,19 @@ AccessibilityBridgeMac::MacOSEventsFromAXEvent(ui::AXEventGenerator::Event event
           .user_info = nil,
       });
       break;
+    case ui::AXEventGenerator::Event::FOCUS_CHANGED:
+      // Keyboard focus moved onto a text field (a click, Tab). Make the field
+      // the field editor's client, as VoiceOver landing on it does
+      // (-[FlutterTextField setAccessibilityFocused:] and the selection change
+      // that follows). Otherwise the field editor stays first responder on
+      // its own, outside the field, and is the focused accessibility element:
+      // an unnamed text area whose parent is the window, which does not list
+      // it, so VoiceOver's next move left the window's content.
+      if (ax_node.data().role == ax::mojom::Role::kTextField &&
+          [native_node isKindOfClass:[FlutterTextField class]]) {
+        [(FlutterTextField*)native_node startEditing];
+      }
+      break;
     case ui::AXEventGenerator::Event::CHILDREN_CHANGED: {
       // NSAccessibilityCreatedNotification seems to be the only way to let
       // Voiceover pick up layout changes.
@@ -283,7 +296,6 @@ AccessibilityBridgeMac::MacOSEventsFromAXEvent(ui::AXEventGenerator::Event event
     case ui::AXEventGenerator::Event::DOCUMENT_TITLE_CHANGED:
     case ui::AXEventGenerator::Event::DROPEFFECT_CHANGED:
     case ui::AXEventGenerator::Event::ENABLED_CHANGED:
-    case ui::AXEventGenerator::Event::FOCUS_CHANGED:
     case ui::AXEventGenerator::Event::FLOW_FROM_CHANGED:
     case ui::AXEventGenerator::Event::FLOW_TO_CHANGED:
     case ui::AXEventGenerator::Event::GRABBED_CHANGED:
