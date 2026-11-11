@@ -271,6 +271,13 @@ build time.
   Without it a resize answered by an empty frame recreated the Windows render
   surface with width and height swapped, so the UI drew 1:1 in the bottom-left
   corner of a white window until the next real resize.
+- `[a11y] fix selected tristate flags mismatch (#184223)` is a cherry-pick of
+  upstream d04108d6bf40 (2026-03-27, first released in 3.44.0). Without it the
+  shared desktop accessibility bridge turned the semantics flag `is_selected`
+  (a tristate: none 0, true 1, false 2) into a bool, so a node that says
+  "not selected" (false, 2) was reported as selected. On Windows NVDA said
+  "selected" on every tab and toggle button that sets `selected: false`
+  (OLYM-9858). It falls away once the SDK is 3.44 or later.
 - `Fix Xcode 27 lipo verification failure for Darwin frameworks (#188625)` and
   the two AHB swapchain commits by Jason Simmons are upstream commits.
 - The F16/EDR/HDR compositing stack itself (macOS, iOS, Android, Windows,
