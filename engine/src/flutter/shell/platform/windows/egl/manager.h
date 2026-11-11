@@ -112,6 +112,11 @@ class Manager {
   // Number of active instances of Manager
   static int instance_count_;
 
+  // Whether any output of any adapter has Windows HDR (advanced color) on,
+  // i.e. reports the HDR10 colour space. Decides the window surface's config
+  // in |InitializeConfig| (OLYM-939).
+  static bool AnyOutputHasHdrEnabled();
+
   // Helper function to get GPU LUID by preference.
   static std::optional<LUID> GetGpuLuidByPreference(
       DXGI_GPU_PREFERENCE preference);

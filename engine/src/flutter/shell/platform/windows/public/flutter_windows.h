@@ -249,6 +249,13 @@ FLUTTER_EXPORT HWND FlutterDesktopViewGetHWND(FlutterDesktopViewRef view);
 FLUTTER_EXPORT IDXGIAdapter* FlutterDesktopViewGetGraphicsAdapter(
     FlutterDesktopViewRef view);
 
+// Returns true when the view renders into the RGBA16F window surface that is
+// presented as LINEAR scRGB (HDR presentation), so Skia composites into a
+// linear F16 backing store; false for the stock 8-bit gamma-encoded surface.
+// An app whose own fragment shaders write directly to the screen decides from
+// this whether they must encode sRGB. Fixed for the life of the engine.
+FLUTTER_EXPORT bool FlutterDesktopViewIsHdrSurface(FlutterDesktopViewRef view);
+
 // Called to pass an external window message to the engine for lifecycle
 // state updates. Non-Flutter windows must call this method in their WndProc
 // in order to be included in the logic for application lifecycle state
