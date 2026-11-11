@@ -278,6 +278,21 @@ build time.
   "not selected" (false, 2) was reported as selected. On Windows NVDA said
   "selected" on every tab and toggle button that sets `selected: false`
   (OLYM-9858). It falls away once the SDK is 3.44 or later.
+- `a11y: Map disabled/read-only semantics to AX node restriction (#190353)` is
+  a cherry-pick of upstream 30c289b8cde9 (2026-08-03, first in the 3.50 beta;
+  no stable release has it as of 3.47.9). Without it the shared desktop
+  accessibility bridge never set a node's restriction, so every Flutter
+  control reached macOS as enabled (AXEnabled = YES) and VoiceOver never said
+  "dimmed" for a button or checkbox that is off (OLYM-9850). Windows reads the
+  same restriction (UIA IsEnabled, MSAA unavailable). Taken without its macOS
+  test, which checks upstream #190330 (a disabled text field shown as static
+  text). #190330 is not carried: it changes how a text field is exposed, which
+  entries 12 and 13 above also change on this branch, and a disabled text field
+  shown that way would still reach the `FlutterTextField` cast in
+  `AccessibilityBridgeMac`'s `VALUE_CHANGED` case. Check that case when the
+  SDK moves to 3.50 or later; then this cherry-pick falls away, and the macOS
+  test added with it (`FlutterPlatformNodeDelegateMac.DisabledControlsAreNotAccessibilityEnabled`)
+  can be dropped or filed upstream.
 - `Fix Xcode 27 lipo verification failure for Darwin frameworks (#188625)` and
   the two AHB swapchain commits by Jason Simmons are upstream commits.
 - The F16/EDR/HDR compositing stack itself (macOS, iOS, Android, Windows,

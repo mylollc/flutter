@@ -477,4 +477,79 @@ TEST(FlutterPlatformNodeDelegateMac, ChangingFlagsUpdatesNativeViewAccessible) {
   EXPECT_TRUE([[native_accessibility className] isEqualToString:@"AXPlatformNodeCocoa"]);
 }
 
+// A control that is off (hasEnabledState without isEnabled) reaches macOS as
+// not enabled (AXEnabled = NO), so VoiceOver reads it as "dimmed". Before the
+// accessibility bridge set the node's restriction, every Flutter button and
+// checkbox on the Mac reported AXEnabled = YES, whatever the app said.
+TEST(FlutterPlatformNodeDelegateMac, DisabledControlsAreNotAccessibilityEnabled) {
+  FlutterViewController* viewController = CreateTestViewController();
+  FlutterEngine* engine = viewController.engine;
+  [viewController loadView];
+  engine.semanticsEnabled = YES;
+  auto bridge = viewController.accessibilityBridge.lock();
+
+  FlutterSemanticsFlags root_flags = FlutterSemanticsFlags{};
+  FlutterSemanticsFlags disabled_button_flags = FlutterSemanticsFlags{
+      .is_enabled = FlutterTristate::kFlutterTristateFalse, .is_button = true};
+  FlutterSemanticsFlags enabled_button_flags =
+      FlutterSemanticsFlags{.is_enabled = FlutterTristate::kFlutterTristateTrue, .is_button = true};
+  FlutterSemanticsFlags disabled_checkbox_flags =
+      FlutterSemanticsFlags{.is_checked = FlutterCheckState::kFlutterCheckStateTrue,
+                            .is_enabled = FlutterTristate::kFlutterTristateFalse};
+
+  auto add_node = [&bridge](int32_t id, const char* label, FlutterSemanticsFlags* flags,
+                            FlutterSemanticsAction actions, size_t child_count,
+                            const int32_t* children) {
+    FlutterSemanticsNode2 node = {};
+    node.id = id;
+    node.flags2 = flags;
+    node.actions = actions;
+    node.text_selection_base = -1;
+    node.text_selection_extent = -1;
+    node.label = label;
+    node.hint = "";
+    node.value = "";
+    node.increased_value = "";
+    node.decreased_value = "";
+    node.tooltip = "";
+    node.child_count = child_count;
+    node.children_in_traversal_order = children;
+    node.custom_accessibility_actions_count = 0;
+    node.identifier = "";
+    node.rect = {0, 0, 100, 100};  // LTRB
+    node.transform = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+    bridge->AddFlutterSemanticsNodeUpdate(node);
+  };
+  int32_t children[] = {1, 2, 3};
+  // NOLINTBEGIN(clang-analyzer-optin.core.EnumCastOutOfRange)
+  add_node(0, "root", &root_flags, static_cast<FlutterSemanticsAction>(0), 3, children);
+  add_node(1, "Ignore untagged faces", &disabled_button_flags,
+           static_cast<FlutterSemanticsAction>(0), 0, nullptr);
+  add_node(2, "Rescan faces", &enabled_button_flags,
+           FlutterSemanticsAction::kFlutterSemanticsActionTap, 0, nullptr);
+  add_node(3, "Info", &disabled_checkbox_flags, static_cast<FlutterSemanticsAction>(0), 0, nullptr);
+  // NOLINTEND(clang-analyzer-optin.core.EnumCastOutOfRange)
+  bridge->CommitUpdates();
+
+  id disabled_button =
+      bridge->GetFlutterPlatformNodeDelegateFromID(1).lock()->GetNativeViewAccessible();
+  ASSERT_NE(disabled_button, nil);
+  EXPECT_TRUE([[disabled_button accessibilityRole] isEqualToString:NSAccessibilityButtonRole]);
+  EXPECT_FALSE([disabled_button isAccessibilityEnabled]);
+
+  id enabled_button =
+      bridge->GetFlutterPlatformNodeDelegateFromID(2).lock()->GetNativeViewAccessible();
+  ASSERT_NE(enabled_button, nil);
+  EXPECT_TRUE([[enabled_button accessibilityRole] isEqualToString:NSAccessibilityButtonRole]);
+  EXPECT_TRUE([enabled_button isAccessibilityEnabled]);
+
+  id disabled_checkbox =
+      bridge->GetFlutterPlatformNodeDelegateFromID(3).lock()->GetNativeViewAccessible();
+  ASSERT_NE(disabled_checkbox, nil);
+  EXPECT_TRUE([[disabled_checkbox accessibilityRole] isEqualToString:NSAccessibilityCheckBoxRole]);
+  EXPECT_FALSE([disabled_checkbox isAccessibilityEnabled]);
+
+  [engine shutDownEngine];
+}
+
 }  // namespace flutter::testing
