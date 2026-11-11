@@ -846,6 +846,17 @@ InferPlatformViewCreationCallback(
   return nullptr;
 }
 
+// The color space of an OpenGL backing store (see MakeSkSurfaceFromBackingStore).
+static sk_sp<SkColorSpace> BackingStoreColorSpace(SkColorType color_type) {
+#if FML_OS_WIN
+  (void)color_type;
+  return SkColorSpace::MakeSRGB();
+#else
+  return color_type == kRGBA_F16_SkColorType ? SkColorSpace::MakeSRGBLinear()
+                                             : SkColorSpace::MakeSRGB();
+#endif  // FML_OS_WIN
+}
+
 static sk_sp<SkSurface> MakeSkSurfaceFromBackingStore(
     GrDirectContext* context,
     const FlutterBackingStoreConfig& config,
@@ -917,16 +928,18 @@ static sk_sp<SkSurface> MakeSkSurfaceFromBackingStore(
     return nullptr;
   }
 
-  // F16 backing stores use a linear color space because HDR-capable GL
-  // presentation paths typically tag their swap chains as linear scRGB
-  // (e.g. DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709 on Windows/ANGLE,
-  // equivalent tagging on Wayland HDR). Writing gamma-encoded values into
-  // a linear-tagged surface brightens midtones. 8-bit backing stores keep
-  // gamma sRGB semantics.
-  sk_sp<SkColorSpace> color_space =
-      (color_type.value() == kRGBA_F16_SkColorType)
-          ? SkColorSpace::MakeSRGBLinear()
-          : SkColorSpace::MakeSRGB();
+  // F16 backing stores use a linear color space where the presentation path
+  // tags its swap chain as linear and shows the store as it is (equivalent
+  // tagging on Wayland HDR). Writing gamma-encoded values into a
+  // linear-tagged surface brightens midtones. 8-bit backing stores keep gamma
+  // sRGB semantics.
+  //
+  // Windows is the exception: its F16 store is tagged (extended) sRGB, so
+  // Skia composites the UI in sRGB and text edges and translucent fills blend
+  // as on the 8-bit surface, and CompositorOpenGL::Present converts it to the
+  // linear scRGB swap chain in one pass. Compositing in linear light there
+  // made small text soft and see-through fills lighter.
+  sk_sp<SkColorSpace> color_space = BackingStoreColorSpace(color_type.value());
 
   auto surface = SkSurfaces::WrapBackendRenderTarget(
       context,                      //  context
@@ -975,11 +988,8 @@ static sk_sp<SkSurface> MakeSkSurfaceFromBackingStore(
     return nullptr;
   }
 
-  // See matching F16/linear-scRGB handling in the framebuffer variant above.
-  sk_sp<SkColorSpace> color_space =
-      (color_type.value() == kRGBA_F16_SkColorType)
-          ? SkColorSpace::MakeSRGBLinear()
-          : SkColorSpace::MakeSRGB();
+  // See the matching F16 handling in the framebuffer variant above.
+  sk_sp<SkColorSpace> color_space = BackingStoreColorSpace(color_type.value());
 
   auto sk_surface = SkSurfaces::WrapBackendRenderTarget(
       context,                      //  context
