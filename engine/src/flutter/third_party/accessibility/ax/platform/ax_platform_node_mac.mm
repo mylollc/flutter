@@ -815,8 +815,20 @@ bool AlsoUseShowMenuActionForDefaultAction(const ui::AXNodeData& data) {
     return NO;
 
   const ax::mojom::Restriction restriction = _node->GetData().GetRestriction();
-  if (restriction == ax::mojom::Restriction::kDisabled)
-    return NO;
+  if (restriction == ax::mojom::Restriction::kDisabled) {
+    // AppKit asks this for every accessibility method of this class, the
+    // getters included (accessibilityRole, accessibilityLabel,
+    // isAccessibilityEnabled). Refusing them all left a disabled control in
+    // the tree with no role, no name and no AXEnabled, so VoiceOver could not
+    // read it at all. A disabled control is still read, and is "dimmed"
+    // through isAccessibilityEnabled; like a disabled AppKit control, it
+    // refuses only what would change it or act on it: the setters and the
+    // accessibilityPerform actions.
+    NSString* name = NSStringFromSelector(selector);
+    if ([name hasPrefix:@"set"] || [name hasPrefix:@"accessibilityPerform"])
+      return NO;
+    return [super isAccessibilitySelectorAllowed:selector];
+  }
 
   if (selector == @selector(setAccessibilityValue:)) {
     // Tabs use the radio button role on Mac, so they are selected by calling

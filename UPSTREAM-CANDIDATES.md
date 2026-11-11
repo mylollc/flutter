@@ -250,6 +250,31 @@ for VoiceOver's focus.
 **PR needs:** the commit as is. It carries a test,
 `FlutterTextInputSemanticsObjectTest.ReportsItsSemanticsParentToAccessibility`.
 
+## 14. macOS: a disabled control is an empty element to VoiceOver
+
+**Commit:** `OLYM-9850: [macOS] A disabled control is still read by VoiceOver, as dimmed`
+**File:** `third_party/accessibility/ax/platform/ax_platform_node_mac.mm`
+**Upstream:** unfixed; on master `-[AXPlatformNodeCocoa isAccessibilitySelectorAllowed:]`
+still returns NO for every selector of a node whose restriction is `kDisabled`.
+Upstream #190353 (2026-08-03, carried here as a cherry-pick, see "Not
+candidates") made the bridge set that restriction, so master has the bug for
+every disabled control.
+
+**Issue text.** On macOS a Flutter control that is off (a button with
+`enabled: false`, a checkbox that can't be changed) shows up to VoiceOver as an
+empty element: no role, no name, no AXEnabled. `isAccessibilitySelectorAllowed:`
+returns NO for every selector when the node is disabled, and AppKit asks it for
+every accessibility method the class implements, the getters included
+(`accessibilityRole`, `accessibilityLabel`, `isAccessibilityEnabled`). Unit tests
+that call those getters directly don't see it, because they skip AppKit's check.
+Fix: a disabled node refuses only the setters and the `accessibilityPerform…`
+actions, like a disabled AppKit control; VoiceOver then reads it with its name
+and "dimmed".
+
+**PR needs:** the commit as is, with the cherry-pick of #190353 already on
+master. It carries a test,
+`FlutterPlatformNodeDelegateMac.DisabledControlsAreNotAccessibilityEnabled`.
+
 ## Formatting status
 
 Checked 2026-10-13 with the engine's own tools: clang-format (buildtools),
@@ -290,9 +315,9 @@ build time.
   entries 12 and 13 above also change on this branch, and a disabled text field
   shown that way would still reach the `FlutterTextField` cast in
   `AccessibilityBridgeMac`'s `VALUE_CHANGED` case. Check that case when the
-  SDK moves to 3.50 or later; then this cherry-pick falls away, and the macOS
-  test added with it (`FlutterPlatformNodeDelegateMac.DisabledControlsAreNotAccessibilityEnabled`)
-  can be dropped or filed upstream.
+  SDK moves to 3.50 or later; then this cherry-pick falls away. Entry 14 does
+  not: without it, the restriction this sets hides a disabled control from
+  VoiceOver on macOS.
 - `Fix Xcode 27 lipo verification failure for Darwin frameworks (#188625)` and
   the two AHB swapchain commits by Jason Simmons are upstream commits.
 - The F16/EDR/HDR compositing stack itself (macOS, iOS, Android, Windows,

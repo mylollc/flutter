@@ -481,6 +481,10 @@ TEST(FlutterPlatformNodeDelegateMac, ChangingFlagsUpdatesNativeViewAccessible) {
 // not enabled (AXEnabled = NO), so VoiceOver reads it as "dimmed". Before the
 // accessibility bridge set the node's restriction, every Flutter button and
 // checkbox on the Mac reported AXEnabled = YES, whatever the app said.
+// AppKit reads an element only through the selectors that
+// isAccessibilitySelectorAllowed: allows, so a disabled control must still
+// allow its getters (its role, name and enabled state), and refuse only its
+// setters and actions.
 TEST(FlutterPlatformNodeDelegateMac, DisabledControlsAreNotAccessibilityEnabled) {
   FlutterViewController* viewController = CreateTestViewController();
   FlutterEngine* engine = viewController.engine;
@@ -536,6 +540,14 @@ TEST(FlutterPlatformNodeDelegateMac, DisabledControlsAreNotAccessibilityEnabled)
   ASSERT_NE(disabled_button, nil);
   EXPECT_TRUE([[disabled_button accessibilityRole] isEqualToString:NSAccessibilityButtonRole]);
   EXPECT_FALSE([disabled_button isAccessibilityEnabled]);
+  EXPECT_TRUE([disabled_button isAccessibilitySelectorAllowed:@selector(accessibilityRole)]);
+  EXPECT_TRUE([disabled_button isAccessibilitySelectorAllowed:@selector(accessibilityLabel)]);
+  EXPECT_TRUE([disabled_button isAccessibilitySelectorAllowed:@selector(isAccessibilityEnabled)]);
+  EXPECT_FALSE(
+      [disabled_button isAccessibilitySelectorAllowed:@selector(accessibilityPerformPress)]);
+  EXPECT_FALSE(
+      [disabled_button isAccessibilitySelectorAllowed:@selector(setAccessibilityFocused:)]);
+  EXPECT_FALSE([disabled_button isAccessibilitySelectorAllowed:@selector(setAccessibilityValue:)]);
 
   id enabled_button =
       bridge->GetFlutterPlatformNodeDelegateFromID(2).lock()->GetNativeViewAccessible();
@@ -548,6 +560,7 @@ TEST(FlutterPlatformNodeDelegateMac, DisabledControlsAreNotAccessibilityEnabled)
   ASSERT_NE(disabled_checkbox, nil);
   EXPECT_TRUE([[disabled_checkbox accessibilityRole] isEqualToString:NSAccessibilityCheckBoxRole]);
   EXPECT_FALSE([disabled_checkbox isAccessibilityEnabled]);
+  EXPECT_TRUE([disabled_checkbox isAccessibilitySelectorAllowed:@selector(accessibilityValue)]);
 
   [engine shutDownEngine];
 }
