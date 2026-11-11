@@ -256,6 +256,15 @@ FLUTTER_EXPORT IDXGIAdapter* FlutterDesktopViewGetGraphicsAdapter(
 // this whether they must encode sRGB. Fixed for the life of the engine.
 FLUTTER_EXPORT bool FlutterDesktopViewIsHdrSurface(FlutterDesktopViewRef view);
 
+// Returns true when the view composites its UI in gamma-encoded sRGB on
+// either window surface: the F16 surface's backing store is tagged sRGB and
+// converted to linear scRGB (scaled to the display's SDR white level) when it
+// is presented, so text and translucent fills blend as on the 8-bit surface.
+// An app whose own fragment shaders write directly to the screen must then
+// encode sRGB whatever FlutterDesktopViewIsHdrSurface answers. Engines without
+// this function composite the F16 surface in linear light.
+FLUTTER_EXPORT bool FlutterDesktopViewComposesInSrgb(FlutterDesktopViewRef view);
+
 // Called to pass an external window message to the engine for lifecycle
 // state updates. Non-Flutter windows must call this method in their WndProc
 // in order to be included in the logic for application lifecycle state

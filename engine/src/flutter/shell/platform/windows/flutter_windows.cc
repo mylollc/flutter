@@ -275,6 +275,14 @@ bool FlutterDesktopViewIsHdrSurface(FlutterDesktopViewRef view) {
   return egl_manager && egl_manager->is_rgba16float();
 }
 
+bool FlutterDesktopViewComposesInSrgb(FlutterDesktopViewRef view) {
+  // Both window surfaces composite the UI in gamma-encoded sRGB: the 8-bit
+  // one natively, the F16 one through an sRGB-tagged backing store that
+  // CompositorOpenGL::Present converts to scRGB.
+  (void)view;
+  return true;
+}
+
 bool FlutterDesktopEngineProcessExternalWindowMessage(
     FlutterDesktopEngineRef engine,
     HWND hwnd,
