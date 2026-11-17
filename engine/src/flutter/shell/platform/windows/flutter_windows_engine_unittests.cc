@@ -374,6 +374,59 @@ TEST_F(FlutterWindowsEngineTest, RunWithoutANGLEUsesSoftware) {
   modifier.embedder_api().Shutdown = [](auto engine) { return kSuccess; };
 }
 
+// The folder set by SetPersistentCachePath reaches the embedder as
+// persistent_cache_path, so Skia keeps compiled programs between launches.
+TEST_F(FlutterWindowsEngineTest, RunPassesPersistentCachePath) {
+  FlutterWindowsEngine::SetPersistentCachePath("C:/cache/shaders");
+
+  FlutterWindowsEngineBuilder builder{GetContext()};
+  std::unique_ptr<FlutterWindowsEngine> engine = builder.Build();
+  EngineModifier modifier(engine.get());
+
+  modifier.embedder_api().NotifyDisplayUpdate =
+      MOCK_ENGINE_PROC(NotifyDisplayUpdate,
+                       ([engine_instance = engine.get()](
+                            FLUTTER_API_SYMBOL(FlutterEngine) raw_engine,
+                            const FlutterEngineDisplaysUpdateType update_type,
+                            const FlutterEngineDisplay* embedder_displays,
+                            size_t display_count) { return kSuccess; }));
+
+  std::string cache_path_seen;
+  bool run_called = false;
+  modifier.embedder_api().Run = MOCK_ENGINE_PROC(
+      Run, ([&](size_t version, const FlutterRendererConfig* config,
+                const FlutterProjectArgs* args, void* user_data,
+                FLUTTER_API_SYMBOL(FlutterEngine) * engine_out) {
+        run_called = true;
+        *engine_out = reinterpret_cast<FLUTTER_API_SYMBOL(FlutterEngine)>(1);
+        if (args->persistent_cache_path != nullptr) {
+          cache_path_seen = args->persistent_cache_path;
+        }
+        return kSuccess;
+      }));
+  modifier.embedder_api().UpdateAccessibilityFeatures = MOCK_ENGINE_PROC(
+      UpdateAccessibilityFeatures,
+      [](FLUTTER_API_SYMBOL(FlutterEngine) engine,
+         FlutterAccessibilityFeature flags) { return kSuccess; });
+  modifier.embedder_api().UpdateLocales = MOCK_ENGINE_PROC(
+      UpdateLocales, ([](auto engine, const FlutterLocale** locales,
+                         size_t locales_count) { return kSuccess; }));
+  modifier.embedder_api().SendPlatformMessage =
+      MOCK_ENGINE_PROC(SendPlatformMessage,
+                       ([](auto engine, auto message) { return kSuccess; }));
+  modifier.SetEGLManager(nullptr);
+
+  engine->Run();
+
+  // The setting is per process: clear it before any other test runs.
+  FlutterWindowsEngine::SetPersistentCachePath("");
+
+  EXPECT_TRUE(run_called);
+  EXPECT_EQ(cache_path_seen, "C:/cache/shaders");
+
+  modifier.embedder_api().Shutdown = [](auto engine) { return kSuccess; };
+}
+
 TEST_F(FlutterWindowsEngineTest, RunWithoutANGLEOnImpellerFailsToStart) {
   FlutterWindowsEngineBuilder builder{GetContext()};
   builder.SetSwitches({"--enable-impeller=true"});
