@@ -7,6 +7,7 @@
 #include <dwmapi.h>
 
 #include <filesystem>
+#include <mutex>
 #include <shared_mutex>
 #include <sstream>
 
@@ -146,7 +147,29 @@ FlutterLocale CovertToFlutterLocale(const LanguageInfo& info) {
   return locale;
 }
 
+// The persistent shader cache's folder (SetPersistentCachePath). Never
+// destroyed, so it needs no exit-time destructor.
+std::mutex& PersistentCachePathMutex() {
+  static std::mutex* mutex = new std::mutex();
+  return *mutex;
+}
+
+std::string& PersistentCachePathStorage() {
+  static std::string* path = new std::string();
+  return *path;
+}
+
 }  // namespace
+
+void FlutterWindowsEngine::SetPersistentCachePath(std::string path) {
+  std::scoped_lock lock(PersistentCachePathMutex());
+  PersistentCachePathStorage() = std::move(path);
+}
+
+std::string FlutterWindowsEngine::GetPersistentCachePath() {
+  std::scoped_lock lock(PersistentCachePathMutex());
+  return PersistentCachePathStorage();
+}
 
 FlutterWindowsEngine::FlutterWindowsEngine(
     const FlutterProjectBundle& project,
@@ -338,6 +361,15 @@ bool FlutterWindowsEngine::Run(std::string_view entrypoint) {
   args.command_line_argc = static_cast<int>(argv.size());
   args.command_line_argv = argv.empty() ? nullptr : argv.data();
   args.engine_id = reinterpret_cast<int64_t>(this);
+
+  // Skia's on-disk shader cache keeps compiled GPU programs between launches.
+  // Windows has no default folder for it (fml::paths::GetCachesDirectory is
+  // unsupported here), so without one set by the app it stays off and every
+  // launch compiles each shader again.
+  std::string persistent_cache_path = GetPersistentCachePath();
+  if (!persistent_cache_path.empty()) {
+    args.persistent_cache_path = persistent_cache_path.c_str();
+  }
 
   // Fail if conflicting non-default entrypoints are specified in the method
   // argument and the project.
