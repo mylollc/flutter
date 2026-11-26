@@ -195,6 +195,18 @@ FLUTTER_EXPORT bool FlutterDesktopEngineDestroy(FlutterDesktopEngineRef engine);
 FLUTTER_EXPORT bool FlutterDesktopEngineRun(FlutterDesktopEngineRef engine,
                                             const char* entry_point);
 
+// Sets the folder where the engine keeps compiled GPU programs between launches
+// (Skia's persistent shader cache), so a later launch loads them instead of
+// compiling them again. Windows has no default folder, so without this call
+// the cache is off.
+//
+// The folder must exist. The engine keeps its files in a subfolder named after
+// the engine and Skia versions, and removes the subfolders of other engine
+// versions. The cache is shared by every engine in the process and is set up
+// when the first one runs, so call this before running any engine. A null or
+// empty |path| turns the cache off.
+FLUTTER_EXPORT void FlutterDesktopSetPersistentCachePath(const wchar_t* path);
+
 // DEPRECATED: This is no longer necessary to call, Flutter will take care of
 // processing engine messages transparently through DispatchMessage.
 //

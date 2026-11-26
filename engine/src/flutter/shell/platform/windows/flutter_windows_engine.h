@@ -104,6 +104,14 @@ class FlutterWindowsEngine {
   // Must be called on the platform thread.
   static FlutterWindowsEngine* GetEngineForId(int64_t engine_id);
 
+  // Sets the folder Skia's persistent shader cache uses, for every engine
+  // this process runs after the call. Empty turns the cache off (the default).
+  // See FlutterDesktopSetPersistentCachePath.
+  static void SetPersistentCachePath(std::string path);
+
+  // The folder set by SetPersistentCachePath; empty when none is set.
+  static std::string GetPersistentCachePath();
+
   // Starts running the entrypoint function specifed in the project bundle. If
   // unspecified, defaults to main().
   //

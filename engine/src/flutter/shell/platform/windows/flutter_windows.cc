@@ -13,6 +13,7 @@
 #include <memory>
 #include <vector>
 
+#include "flutter/fml/platform/win/wstring_conversion.h"
 #include "flutter/shell/platform/common/client_wrapper/include/flutter/plugin_registrar.h"
 #include "flutter/shell/platform/common/incoming_message_dispatcher.h"
 #include "flutter/shell/platform/common/path_utils.h"
@@ -212,6 +213,11 @@ bool FlutterDesktopEngineRun(FlutterDesktopEngineRef engine,
   }
 
   return EngineFromHandle(engine)->Run(entry_point_view);
+}
+
+void FlutterDesktopSetPersistentCachePath(const wchar_t* path) {
+  flutter::FlutterWindowsEngine::SetPersistentCachePath(
+      path ? fml::WideStringToUtf8(path) : std::string());
 }
 
 uint64_t FlutterDesktopEngineProcessMessages(FlutterDesktopEngineRef engine) {
