@@ -275,6 +275,20 @@ bool FlutterDesktopViewIsHdrSurface(FlutterDesktopViewRef view) {
   return egl_manager && egl_manager->is_rgba16float();
 }
 
+bool FlutterDesktopViewComposesInSrgb(FlutterDesktopViewRef view) {
+  // Both window surfaces composite the UI in gamma-encoded sRGB: the 8-bit
+  // one natively, the F16 one through an sRGB-tagged backing store that
+  // CompositorOpenGL::Present converts to scRGB.
+  //
+  // The answer describes how the backing store is encoded, which embedder.cc
+  // fixes for the life of the engine. It does not depend on the present pass:
+  // if that pass's program fails to build (CompositorOpenGL logs an error and
+  // copies the store as it is), Skia still composites in sRGB, so an app's own
+  // shaders must still encode sRGB to match every other draw in the store.
+  (void)view;
+  return true;
+}
+
 bool FlutterDesktopEngineProcessExternalWindowMessage(
     FlutterDesktopEngineRef engine,
     HWND hwnd,
