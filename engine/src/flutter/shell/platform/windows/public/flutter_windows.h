@@ -251,7 +251,9 @@ FLUTTER_EXPORT IDXGIAdapter* FlutterDesktopViewGetGraphicsAdapter(
 
 // Returns true when the view renders into the RGBA16F window surface that is
 // presented as LINEAR scRGB (HDR presentation); false for the stock 8-bit
-// gamma-encoded surface. Fixed for the life of the engine. Whether Skia
+// gamma-encoded surface, which the engine takes only when ANGLE has no
+// RGBA16F config. Fixed for the life of the engine, and the same whether or
+// not a display has Windows HDR on. Whether Skia
 // composites the F16 surface's backing store in linear light or in sRGB is
 // FlutterDesktopViewComposesInSrgb's answer.
 FLUTTER_EXPORT bool FlutterDesktopViewIsHdrSurface(FlutterDesktopViewRef view);

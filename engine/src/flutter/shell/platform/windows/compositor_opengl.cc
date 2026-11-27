@@ -449,6 +449,20 @@ float CompositorOpenGL::SdrWhiteScale(HWND hwnd) {
             ::wcscmp(source.viewGdiDeviceName, monitor_info.szDevice) != 0) {
           continue;
         }
+        // The F16 surface is taken on every display (egl/manager.cc). With
+        // Windows HDR off, scRGB 1.0 is the display's white, so the scale
+        // stays 1.0 whatever SDR white level Windows keeps for the display.
+        // HDR is on when advanced colour is enabled and not just enforced for
+        // wide colour (automatic colour management on an SDR display).
+        DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO color = {};
+        color.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_ADVANCED_COLOR_INFO;
+        color.header.size = sizeof(color);
+        color.header.adapterId = paths[i].targetInfo.adapterId;
+        color.header.id = paths[i].targetInfo.id;
+        if (::DisplayConfigGetDeviceInfo(&color.header) != ERROR_SUCCESS ||
+            !color.advancedColorEnabled || color.wideColorEnforced) {
+          break;
+        }
         DISPLAYCONFIG_SDR_WHITE_LEVEL white = {};
         white.header.type = DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL;
         white.header.size = sizeof(white);

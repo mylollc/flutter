@@ -184,29 +184,6 @@ bool Manager::InitializeDisplay(GpuPreference gpu_preference) {
   FML_UNREACHABLE();
 }
 
-bool Manager::AnyOutputHasHdrEnabled() {
-  Microsoft::WRL::ComPtr<IDXGIFactory1> factory;
-  if (FAILED(::CreateDXGIFactory1(IID_PPV_ARGS(&factory)))) {
-    return false;
-  }
-  Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;
-  for (UINT a = 0; factory->EnumAdapters1(a, &adapter) != DXGI_ERROR_NOT_FOUND;
-       ++a) {
-    Microsoft::WRL::ComPtr<IDXGIOutput> output;
-    for (UINT o = 0; adapter->EnumOutputs(o, &output) != DXGI_ERROR_NOT_FOUND;
-         ++o) {
-      Microsoft::WRL::ComPtr<IDXGIOutput6> output6;
-      DXGI_OUTPUT_DESC1 desc = {};
-      if (SUCCEEDED(output.As(&output6)) &&
-          SUCCEEDED(output6->GetDesc1(&desc)) &&
-          desc.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020) {
-        return true;
-      }
-    }
-  }
-  return false;
-}
-
 bool Manager::InitializeConfig() {
   // Prefer an RGBA16 float-component config so HDR content can be composited
   // with values >1.0 preserved. The paired surface colorspace attribute in
@@ -214,16 +191,15 @@ bool Manager::InitializeConfig() {
   // the legacy RGBA8 config on systems where ANGLE can't supply F16 (e.g.
   // older drivers, WARP software fallback, D3D11 Feature Level 9_3).
   //
-  // The F16 window surface is presented as scRGB, which is LINEAR, so Skia
-  // composites the whole UI in linear light there: every anti-aliased text
-  // edge and every translucent fill blends differently from stock Flutter and
-  // from macOS, and small light-on-dark text looks soft and haloed at 100%
-  // scaling (OLYM-939). That trade only buys something when a display can
-  // show values above 1.0, so the F16 config is taken only when a connected
-  // output has Windows HDR turned on at startup. Otherwise the window uses
-  // the same RGBA8 config as the "F16 unavailable" fallback below, which is
-  // the surface stock Flutter blends in. Turning HDR on later takes effect at
-  // the next launch: the config is fixed for the life of the contexts.
+  // The F16 config is taken on every display, whether or not Windows HDR is
+  // on, so HDR turned on while the app runs needs no relaunch: the config is
+  // fixed for the life of the contexts, and the surface's colour space
+  // (scRGB) already carries values above 1.0 to a display that has HDR on.
+  // On a display with HDR off, Windows clips them at SDR white. The UI looks
+  // the same on both surfaces: embedder.cc tags the F16 backing store sRGB,
+  // so Skia composites the UI in sRGB as on the 8-bit surface, and
+  // |CompositorOpenGL::Present| converts it to scRGB once, scaled to the
+  // display's SDR white level (1.0 on a display with HDR off).
   const EGLint f16_config_attributes[] = {EGL_COLOR_COMPONENT_TYPE_EXT,
                                           EGL_COLOR_COMPONENT_TYPE_FLOAT_EXT,
                                           EGL_RED_SIZE,
@@ -257,12 +233,6 @@ bool Manager::InitializeConfig() {
       num_config == 0) {
     LogEGLError("Failed to choose RGBA8 EGL config");
     return false;
-  }
-
-  if (!AnyOutputHasHdrEnabled()) {
-    FML_LOG(INFO) << "No display has HDR on; using the RGBA8 EGL config.";
-    config_ = config_rgba8_;
-    return true;
   }
 
   if (::eglChooseConfig(display_, f16_config_attributes, &config_, 1,

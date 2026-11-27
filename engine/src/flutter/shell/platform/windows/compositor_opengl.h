@@ -95,7 +95,8 @@ class CompositorOpenGL : public Compositor {
   // SDR white / 80 nits for the monitor the view was last presented on.
   // Re-read when the window moves to another monitor and at most once a
   // second otherwise, since the SDR content brightness slider sends no
-  // window message.
+  // window message, and Windows HDR turned on or off follows within that
+  // second too.
   float sdr_white_scale_ = 1.0f;
   void* sdr_white_monitor_ = nullptr;
   uint64_t sdr_white_read_ms_ = 0;
@@ -107,8 +108,9 @@ class CompositorOpenGL : public Compositor {
   // |present_program_failed_|) when the shaders do not compile or link.
   bool EnsurePresentProgram();
 
-  // SDR white level of |hwnd|'s monitor divided by 80 nits; 1.0 when Windows
-  // reports none (HDR off, or a display without advanced colour).
+  // SDR white level of |hwnd|'s monitor divided by 80 nits when the monitor
+  // has Windows HDR on; 1.0 otherwise (HDR off, automatic colour management
+  // on an SDR display, or a display without advanced colour).
   float SdrWhiteScale(HWND hwnd);
 
   // Clear the view's surface and removes any previously presented layers.
